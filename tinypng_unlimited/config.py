@@ -111,6 +111,9 @@ class Config:
     # 密钥管理配置
     KEY_THRESHOLD: int = 3
     KEY_USAGE_LIMIT: int = 490
+
+    # SnapMail API Key
+    SNAPMAIL_API_KEY: Optional[str] = None
     
     @classmethod
     def load(cls, env_file: str = None):
@@ -145,6 +148,9 @@ class Config:
         # 密钥管理配置
         cls.KEY_THRESHOLD = get_env_int('KEY_THRESHOLD', 3)
         cls.KEY_USAGE_LIMIT = get_env_int('KEY_USAGE_LIMIT', 490)
+
+        # SnapMail API Key
+        cls.SNAPMAIL_API_KEY = get_env_str('SNAPMAIL_API_KEY')
     
     @classmethod
     def get_proxy(cls) -> Optional[str]:

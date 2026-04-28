@@ -9,16 +9,19 @@ TinyPNG-Unlimited is a Python CLI tool for unlimited batch image compression via
 ## Commands
 
 **Install dependencies:**
+
 ```bash
 pip install -r requirements.txt
 ```
 
 **Run the CLI:**
+
 ```bash
 python bin/main.py <command> [options]
 ```
 
 **Subcommands:**
+
 ```bash
 python bin/main.py file "path/to/image.jpg"           # compress single file
 python bin/main.py dir [-d DIR] [-p PROXY] [-r] [-l]  # compress directory
@@ -32,7 +35,7 @@ No test framework, linter, or build system is configured.
 
 ## Architecture
 
-```
+```text
 bin/main.py                   # argparse CLI entry point → 6 command handlers
 tinypng_unlimited/
   config.py                   # Config class: loads .env + env vars, typed accessors
@@ -63,8 +66,9 @@ tinypng_unlimited/
 Copy `config.env.template` to `config.env`. Key variables:
 
 | Variable | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `TINYPNG_API_KEYS` | _(empty)_ | Pre-seeded API keys (comma-separated) |
+| `SNAPMAIL_API_KEY` | _(empty)_ | **Required** for auto-applying keys — get from snapmail.cc "My Account" |
 | `HTTP_PROXY` / `HTTPS_PROXY` | _(empty)_ | Proxy for all outbound requests |
 | `THREAD_NUM` | `4` | Concurrent compression workers |
 | `KEY_THRESHOLD` | `3` | Min available keys before auto-apply |

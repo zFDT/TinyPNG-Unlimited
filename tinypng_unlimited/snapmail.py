@@ -4,6 +4,7 @@ from loguru import logger
 from requests import Session
 
 from tinypng_unlimited.errors import SnapMailException
+from tinypng_unlimited.config import Config
 
 
 class SnapMail:
@@ -50,9 +51,12 @@ class SnapMail:
         while True:
             try:
                 # 使用新的 POST /emailList/filter API
+                payload = {'emailAddress': cls.mail}
+                if Config.SNAPMAIL_API_KEY:
+                    payload['key'] = Config.SNAPMAIL_API_KEY
                 res = session.post(
                     cls.BASE_URL + 'emailList/filter',
-                    json={'email': cls.mail}
+                    json=payload
                 )
                 
                 if res.status_code != 200:
