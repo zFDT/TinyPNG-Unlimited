@@ -1,7 +1,7 @@
 # TinyPNG-Unlimited
 
-**自动申请 API 密钥、多线程、带进度条的 TinyPNG 批量云压缩命令行工具**
-
+> 自动申请 API 密钥、多线程、带进度条的 TinyPNG 批量云压缩命令行工具
+>
 > 本项目仅供技术研究使用，请勿用于任何商业及非法用途，任何后果作者概不负责。
 
 ---
@@ -22,14 +22,20 @@
 
 ## 安装
 
+### 方式一：源码运行
+
 ```bash
 # 克隆仓库
-git clone https://github.com/ruchuby/TinyPNG-Unlimited.git
+git clone https://github.com/zFDT/TinyPNG-Unlimited.git
 cd TinyPNG-Unlimited
 
-# 安装依赖
+# 安装依赖（需 Python 3.10+）
 pip install -r requirements.txt
 ```
+
+### 方式二：下载编译好的 Windows exe
+
+前往 [Releases](https://github.com/zFDT/TinyPNG-Unlimited/releases/latest) 下载 `TinyPNG-Unlimited.exe`，无需安装 Python 环境，开箱即用。
 
 ---
 
