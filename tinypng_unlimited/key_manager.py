@@ -180,17 +180,21 @@ class KeyManager:
             try:
                 emails = ApihzMail.get_email_list(session, 1)
                 text = emails[0].get('text', '')
-                match = re.search(r'(https://tinify\.com/login\?token=.*?api)', text)
-                if not match:
-                    # 部分邮件客户端换行，尝试从 HTML 中提取
-                    html = emails[0].get('html', '')
-                    match = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s]+)', html)
-                if not match:
-                    raise ApplyKeyException('激活链接提取失败，邮件内容：' + text[:200], None)
-                url = match.group(1)
+
+                # 邮件内容为 HTML，从 href 属性中提取激活链接
+                match = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s&]+(?:&amp;|&)[^"\'>\s]+)', text)
+                if match:
+                    url = match.group(1).replace('&amp;', '&')
+                else:
+                    # 回退：尝试纯文本格式
+                    m2 = re.search(r'(https://tinify\.com/login\?token=[^\s<"\']+)', text)
+                    if m2:
+                        url = m2.group(1).replace('&amp;', '&')
+                    else:
+                        raise ApplyKeyException('激活链接提取失败，邮件内容：' + text[:300], None)
             except TempMailException as e:
                 raise ApplyKeyException('确认邮件接收失败', e)
-            logger.info('激活链接提取成功')
+            logger.info('激活链接提取成功: {}', url[:60] + '...')
 
             # 访问激活链接，生成密钥
             retry = 0
