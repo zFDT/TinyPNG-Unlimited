@@ -31,7 +31,7 @@ class KeyManager:
         cls.working_dir = working_dir
         cls.load_keys()
         if len(cls.Keys.available) < 3:
-            logger.warning('当前可用密钥少于3条，优先申请新密钥')
+            logger.warning('当前可用密钥少于3条，尝试申请新密钥')
             cls.apply_store_key()
 
     @classmethod
@@ -107,15 +107,29 @@ class KeyManager:
         cls.load_keys()
 
         if len(cls.Keys.available) < 3:
-            logger.warning('可用密钥少于3条，优先申请新密钥')
+            logger.warning('可用密钥少于3条，尝试申请新密钥')
             cls.apply_store_key()
 
         if not len(cls.Keys.available):
-            raise Exception('无可用密钥，请申请后重试')
+            raise Exception('无可用密钥，请申请后重试或通过 add_key 手动添加密钥')
         cls.Keys.unavailable.append(cls.Keys.available.pop(0))
         cls.store_key()
         logger.debug('密钥已切换，等待载入')
         return cls.Keys.available[0]
+
+    @classmethod
+    def add_key(cls, key: str):
+        """
+        手动添加 TinyPNG API 密钥
+        :param key: TinyPNG API 密钥字符串
+        """
+        cls.load_keys()
+        if key not in cls.Keys.available and key not in cls.Keys.unavailable:
+            cls.Keys.available.append(key)
+            cls.store_key()
+            logger.success('密钥已手动添加: {}', key[:8] + '...')
+        else:
+            logger.warning('密钥已存在，跳过添加')
 
     @classmethod
     def _apply_api_key(cls) -> str:
@@ -190,4 +204,7 @@ class KeyManager:
             except Timeout as e:
                 logger.error("请求超时: {} - {}({})", e.request.method, e.request.url, bytes.decode(e.request.content))
             except Exception as e:
-                logger.error(e)
+                logger.error('自动申请密钥失败: {}', e)
+                logger.warning('提示：您可以手动添加 TinyPNG API 密钥')
+                logger.warning('使用方法：python bin/main.py add_key <your_api_key>')
+                break

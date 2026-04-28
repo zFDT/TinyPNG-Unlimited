@@ -241,6 +241,12 @@ def command_rearrange(args):
     KeyManager.rearrange_keys()
 
 
+def command_add_key(args):
+    KeyManager.working_dir = os.path.dirname(cur_file_path)
+    KeyManager.load_keys()
+    KeyManager.add_key(args.key)
+
+
 def main():
     # 命令行参数解析
     parser = argparse.ArgumentParser(description='Tinify Your Images Unlimited! '
@@ -272,9 +278,14 @@ def main():
     apply_parser.set_defaults(func=command_apply)
 
     # rearrange
-    apply_parser = subparsers.add_parser('rearrange',
+    rearrange_parser = subparsers.add_parser('rearrange',
                                          help='Rearrange API keys in keys.json by compression count.')
-    apply_parser.set_defaults(func=command_rearrange)
+    rearrange_parser.set_defaults(func=command_rearrange)
+
+    # add_key
+    add_key_parser = subparsers.add_parser('add_key', help='Manually add a TinyPNG API key.')
+    add_key_parser.add_argument('key', type=str, help='The TinyPNG API key to add.')
+    add_key_parser.set_defaults(func=command_add_key)
 
     args = parser.parse_args()
     if 'func' not in args:
