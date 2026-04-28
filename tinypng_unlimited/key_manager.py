@@ -198,13 +198,14 @@ class KeyManager:
                 logger.debug('邮件完整内容已保存: {}', debug_path)
 
                 url = None
-                # 优先从 href 属性提取（HTML 邮件，&amp; 解码）
-                m = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s]+)', text)
+                # TinyPNG 确认邮件中 href 格式：
+                # href="https://tinypng.com/login?token=...&amp;new=true&amp;redirect=..."
+                m = re.search(r'href=["\']?(https://(?:tinypng|tinify)\.com/login\?token=[^"\'>\s]+)', text)
                 if m:
                     url = m.group(1).replace('&amp;', '&')
                 if not url:
-                    # 回退：纯文本格式（旧版格式末尾含 &api）
-                    m = re.search(r'(https://tinify\.com/login\?token=\S+)', text)
+                    # 回退：纯文本格式
+                    m = re.search(r'(https://(?:tinypng|tinify)\.com/login\?token=\S+)', text)
                     if m:
                         url = m.group(1).rstrip('.,)>').replace('&amp;', '&')
                 if not url:
