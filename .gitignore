@@ -136,3 +136,9 @@ bin/tmp
 bin/keys.json
 bin/*.json
 bin/tasks.py
+
+
+.real
+.rewind_websearch
+memory
+snapshot
