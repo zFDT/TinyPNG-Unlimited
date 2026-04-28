@@ -155,6 +155,16 @@ class KeyManager:
             raise ApplyKeyException('未配置 APIHZ_ID / APIHZ_KEY，无法自动申请密钥', None)
 
         with requests.Session() as session:
+            # 仅对 tinypng.com 的请求使用代理（绕过 IP 频率限制）
+            # apihz.cn 为国内服务，直连即可
+            proxy = Config.get_proxy()
+            if proxy:
+                session.proxies = {
+                    'http': proxy,
+                    'https': proxy,
+                }
+                logger.debug('申请密钥使用代理: {}', proxy)
+
             # 创建临时邮箱（消耗 1 次 apihz 调用）
             try:
                 mail = ApihzMail.create_new_mail(session)
@@ -181,27 +191,29 @@ class KeyManager:
                 emails = ApihzMail.get_email_list(session, 1)
                 text = emails[0].get('text', '')
 
-                # 邮件内容为 HTML，从 href 属性中提取激活链接
-                match = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s&]+(?:&amp;|&)[^"\'>\s]+)', text)
-                if match:
-                    url = match.group(1).replace('&amp;', '&')
-                else:
-                    # 回退：尝试纯文本格式
-                    m2 = re.search(r'(https://tinify\.com/login\?token=[^\s<"\']+)', text)
-                    if m2:
-                        url = m2.group(1).replace('&amp;', '&')
-                    else:
-                        # 保存完整邮件内容到文件，方便分析
-                        debug_path = os.path.abspath(
-                            os.path.join(cls.working_dir, 'debug_email.html')
-                        )
-                        with open(debug_path, 'w', encoding='utf-8') as f:
-                            f.write(text)
-                        logger.warning('邮件完整内容已保存到: {}', debug_path)
-                        raise ApplyKeyException('激活链接提取失败，完整邮件已保存到 debug_email.html', None)
+                # 始终保存完整邮件便于调试（覆盖写入，保留最新一封）
+                debug_path = os.path.abspath(os.path.join(cls.working_dir, 'debug_email.html'))
+                with open(debug_path, 'w', encoding='utf-8') as _f:
+                    _f.write(text)
+                logger.debug('邮件完整内容已保存: {}', debug_path)
+
+                url = None
+                # 优先从 href 属性提取（HTML 邮件，&amp; 解码）
+                m = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s]+)', text)
+                if m:
+                    url = m.group(1).replace('&amp;', '&')
+                if not url:
+                    # 回退：纯文本格式（旧版格式末尾含 &api）
+                    m = re.search(r'(https://tinify\.com/login\?token=\S+)', text)
+                    if m:
+                        url = m.group(1).rstrip('.,)>').replace('&amp;', '&')
+                if not url:
+                    raise ApplyKeyException(
+                        '激活链接提取失败，完整邮件已保存至 ' + debug_path, None
+                    )
             except TempMailException as e:
                 raise ApplyKeyException('确认邮件接收失败', e)
-            logger.info('激活链接提取成功: {}', url[:60] + '...')
+            logger.info('激活链接提取成功: {}...', url[:60])
 
             # 访问激活链接，生成密钥
             retry = 0

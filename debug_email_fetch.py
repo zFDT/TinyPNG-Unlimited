@@ -43,6 +43,13 @@ with requests.Session() as session:
         'mail': mail,
     })
     print(f'注册响应: {res.status_code} {res.text}')
+    if res.status_code == 429:
+        print('\n⚠ TinyPNG 注册频率限制，当前 IP 已被临时封禁。')
+        print('请等待 15～30 分钟后再试，或在 config.env 中配置 HTTP_PROXY。')
+        sys.exit(1)
+    if res.status_code != 200 or res.text != '{}':
+        print(f'注册失败: {res.status_code} {res.text}')
+        sys.exit(1)
 
     print(f'\n等待 {ApihzMail._min_interval}s 让邮件到达...')
     time.sleep(ApihzMail._min_interval)
