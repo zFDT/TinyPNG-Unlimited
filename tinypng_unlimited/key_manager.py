@@ -191,7 +191,14 @@ class KeyManager:
                     if m2:
                         url = m2.group(1).replace('&amp;', '&')
                     else:
-                        raise ApplyKeyException('激活链接提取失败，邮件内容：' + text[:300], None)
+                        # 保存完整邮件内容到文件，方便分析
+                        debug_path = os.path.abspath(
+                            os.path.join(cls.working_dir, 'debug_email.html')
+                        )
+                        with open(debug_path, 'w', encoding='utf-8') as f:
+                            f.write(text)
+                        logger.warning('邮件完整内容已保存到: {}', debug_path)
+                        raise ApplyKeyException('激活链接提取失败，完整邮件已保存到 debug_email.html', None)
             except TempMailException as e:
                 raise ApplyKeyException('确认邮件接收失败', e)
             logger.info('激活链接提取成功: {}', url[:60] + '...')
