@@ -47,15 +47,15 @@ class KeyManager:
 
     @classmethod
     def load_keys(cls):
-        """
-        加载本地存储的密钥
-        """
+        """从 bin/keys.json 加载密钥，文件不存在时初始化为空列表。"""
         path = os.path.abspath(os.path.join(cls.working_dir, 'keys.json'))
         if not os.path.exists(path):
             cls.Keys.load({})
         else:
             with open(path, 'r', encoding='utf-8') as f:
                 cls.Keys.load(json.load(f))
+        logger.debug('加载密钥完成：可用 {} 条，不可用 {} 条',
+                     len(cls.Keys.available), len(cls.Keys.unavailable))
 
     @classmethod
     def store_key(cls):
@@ -102,8 +102,7 @@ class KeyManager:
 
         for type_name in ('available', 'unavailable'):
             out[type_name].sort(key=lambda item: item[1], reverse=True)
-            logger.info('统计信息:', type_name)
-            logger.info(json.dumps(out[type_name], indent=2))
+            logger.info('{}：{}', type_name, json.dumps(out[type_name], indent=2))
             out[type_name] = [x[0] for x in out[type_name]]
 
         cls.Keys.load(out)
@@ -271,5 +270,5 @@ class KeyManager:
             except Exception as e:
                 logger.error('自动申请密钥失败: {}', e)
                 logger.warning('提示：您可以手动添加 TinyPNG API 密钥')
-                logger.warning('使用方法：python bin/main.py add_key <your_api_key>')
+                logger.warning('使用方法：python main.py add_key <your_api_key>')
                 break

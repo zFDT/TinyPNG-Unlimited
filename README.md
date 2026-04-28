@@ -1,183 +1,176 @@
-# tinypng-unlimited
+# TinyPNG-Unlimited
 
-**自动申请API秘钥、多线程、带上传下载进度条的TinyPNG批量云压缩命令行工具**
+**自动申请 API 密钥、多线程、带进度条的 TinyPNG 批量云压缩命令行工具**
 
-掘金文章：[无限制、多线程、带进度条的TinyPNG云压缩工具[Python]](https://juejin.cn/post/7163847609134612488)
+> 本项目仅供技术研究使用，请勿用于任何商业及非法用途，任何后果作者概不负责。
 
-## 介绍
+---
 
-### TinyPNG
+## 功能特性
 
-TinyPNG将WebP, PNG and JPEG图片进行智能有损压缩，该压缩对视觉的影响几乎不可见，但是能显著压缩文件体积，以节省空间储存，方便网络传输。
+1. 通过[接口盒子](https://www.apihz.cn)临时邮箱**自动申请 TinyPNG API 密钥**，实现无限制压缩
+2. 可用密钥接近 500 次限额时**自动切换**到下一条密钥
+3. 多线程并发上传/下载，**加速批量压缩**（线程数可配置）
+4. 上传、下载、整体任务均有**进度条**
+5. 已压缩的文件写入标记字节，**重复运行自动跳过**
+6. 支持**递归子文件夹**及**正则匹配**文件名
+7. 支持通过 JSON 配置文件**批量提交任务**
+8. 支持配置**代理**（建议在国内环境使用以避免 TinyPNG 注册 IP 限制）
+9. 上传/下载带**超时保护**，失败自动重试，超限保存错误列表供下次继续
 
-通过邮箱免费申请TinyPNG官方API密钥，可以获得每月500张图片的免费压缩次数（不限文件大小）。
-
-因此，通过API进行图片批量压缩是相对理想的形式，[TinyPNG – Developer API](https://tinypng.com/developers)
-
-### tinypng-unlimited
-
-> 本项目仅供技术研究使用，请勿用于任何商业及非法用途，任何后果作者概不负责！
-
-**本项目可自动申请API密钥，以多线程形式批量进行TinyPNG压缩，并附带上传、下载和总体任务的进度条，旨在提供最方便快捷的云压缩功能**
-
-本项目实现的功能：
-
-1. 通过多个临时邮箱自动申请TinyPNG官方API密钥，以实现**无限制使用TinyPNG**
-2. **自动切换不可用密钥**（即将达到500次免费压缩的密钥）
-3. 多线程上传下载图片，**加快批量压缩进度**
-4. 可选**使用代理**上传、下载图片
-5. 可选**递归子文件夹**，可通过**正则匹配**需要压缩的文件名
-6. 可选**通过配置文件批量添加**图片文件名、文件夹任务列表
-7. 可选**输出压缩日志**到图片输出文件夹目录
-8. 显示上传、下载和总体任务的**进度条**
-9. 为每个压缩后的图片添加压缩标记字节（不影响图片内容），**避免重复压缩**
-10. 上传、下载带有**超时时间**
-11. **压缩错误自动重试**，超出重试次数输出错误文件列表，下次运行时自动重新压缩
-
-
+---
 
 ## 安装
 
-方式一：
+```bash
+# 克隆仓库
+git clone https://github.com/ruchuby/TinyPNG-Unlimited.git
+cd TinyPNG-Unlimited
 
-1. 下载本项目文件
+# 安装依赖
+pip install -r requirements.txt
+```
 
-2. 安装依赖
-   
-	```
-	pip install -r requirements.txt
-	```
+---
 
-方式二：
+## 配置
 
-1. 下载已编译命令行工具：[TinyPNG-Unlimited.exe](https://github.com/ruchuby/TinyPNG-Unlimited/releases)
-
-
-
-### 使用
-
-#### 环境变量配置（推荐）
-
-本项目支持通过 `.env` 文件管理配置项，实现代码与配置的分离。
-
-**1. 创建配置文件**
-
-复制模板文件 `config.env.template` 为 `config.env`：
+复制配置模板并填写参数：
 
 ```bash
 cp config.env.template config.env
 ```
 
-**2. 编辑配置**
+`config.env` 关键配置项：
 
-打开 `config.env` 文件，根据需要修改以下配置：
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TINYPNG_API_KEYS` | 空 | 手动预置的 API 密钥（逗号分隔），优先使用 |
+| `APIHZ_ID` | **必填** | 接口盒子开发者 ID（登录 apihz.cn 后在个人中心获取） |
+| `APIHZ_KEY` | **必填** | 接口盒子开发者 KEY |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 空 | 代理地址，如 `http://127.0.0.1:7890` |
+| `LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `THREAD_NUM` | `4` | 并发压缩线程数 |
+| `KEY_THRESHOLD` | `3` | 可用密钥少于此数量时自动申请新密钥 |
+| `KEY_USAGE_LIMIT` | `490` | 单密钥使用次数上限（达到后切换，TinyPNG 限 500/月） |
+| `UPLOAD_TIMEOUT` | `60` | 上传超时时间（秒） |
+| `DOWNLOAD_TIMEOUT` | `30` | 下载超时时间（秒） |
+| `MAX_RETRY` | `3` | 单文件最大重试次数 |
+
+> `config.env` 已加入 `.gitignore`，不会提交到版本控制。
+
+### 关于代理
+
+TinyPNG 对同一 IP 短时间内注册账号有频率限制。如遇到"注册频繁"或邮件始终收不到的情况，建议在 `config.env` 中配置本地代理：
 
 ```ini
-# TinyPNG API Keys（可选，手动添加的密钥会优先使用）
-TINYPNG_API_KEYS=key1,key2,key3
-
-# 代理设置（可选）
 HTTP_PROXY=http://127.0.0.1:7890
 HTTPS_PROXY=http://127.0.0.1:7890
-
-# 超时设置（秒）
-REQUEST_TIMEOUT=30
-
-# 线程数
-MAX_WORKERS=5
-
-# 日志级别（DEBUG, INFO, WARNING, ERROR）
-LOG_LEVEL=INFO
 ```
-
-**3. 注意事项**
-
-- `config.env` 文件已被加入 `.gitignore`，不会被提交到版本控制
-- 如果未配置 `config.env`，程序会使用默认值或命令行参数
-- API Keys 可以通过 `main.py apply` 命令自动申请，也可以手动添加到配置文件中
-
-#### SnapMail 服务限制说明
-
-本项目使用 SnapMail 临时邮箱服务自动申请 TinyPNG API Key。SnapMail 免费版有以下限制：
-
-- **API 请求间隔**：至少 10 秒。程序已内置频率控制机制，自动遵守此限制。
-- **24小时同主题邮件数量**：最多 50 封。批量申请密钥时，程序会自动增加间隔时间以避免触发限制。
-- **邮件保存时长**：48 小时。不影响即时获取验证码的流程。
-- **域名验证**：SnapMail 域名已通过 TinyPNG 验证，无需额外配置。
-
-**如果遇到申请失败：**
-
-1. 检查网络连接是否正常
-2. 等待一段时间后再次尝试（避免频繁请求触发限流）
-3. 手动申请 API Key 并通过 `config.env` 配置
 
 ---
 
-### 使用
+## 使用
 
-1. 压缩单文件
-    ```bash
-    path\to\your\python main.py file "path\to\your\image"
-    TinyPNG-Unlimited.exe file "path\to\your\image"
-    ```
-    
-2. 压缩单文件夹
-   ```bash
-   path\to\your\python main.py dir "path\to\your\image\dir"
-   TinyPNG-Unlimited.exe dir "path\to\your\image\dir"
-   ```
-   
-3. 使用配置文件批量压缩
-	```bash
-    path\to\your\python main.py tasks "path\to\tasks.json"
-    TinyPNG-Unlimited.exe dir "path\to\tasks.json"
-	```
-	tasks-emample.json: 
-	
-	```json
-	{
-		"file_tasks": ["D:\\1.jpg", "D:\\2.jpg"],
-		"dir_tasks": ["D:\\dir1", "D:\\dir2"]
-	}
-	```
-	
-	参考 [tasks-help.txt](https://github.com/ruchuby/TinyPNG-Unlimited/blob/develop/bin/tasks-help.txt)
-	
-4. 申请API密钥
+所有命令均从项目根目录执行：
 
-   程序运行时会自动申请密钥，但也可以通过此方式再次申请
-	```bash
-    path\to\your\python main.py apply 4
-    TinyPNG-Unlimited.exe apply 4
-	```
-   
-5. 重新排列API密钥顺序
+### 申请 API 密钥
 
-	依次请求获取本地储存的API密钥压缩次数，重新排列密钥顺序
-	
-	```bash
-	path\to\your\python main.py rearrange
-	TinyPNG-Unlimited.exe rearrange
-	```
+首次使用前，或密钥不足时，手动申请：
 
-6. 更多细节请使用命令行帮助，或者打开项目源码查看
+```bash
+python main.py apply        # 申请 4 个
+python main.py apply 2      # 申请指定数量
+```
 
-   ```bash
-   TinyPNG-Unlimited.exe -h
-   TinyPNG-Unlimited.exe file -h
-   TinyPNG-Unlimited.exe dir -h
-   TinyPNG-Unlimited.exe tasks -h
-   TinyPNG-Unlimited.exe apply -h
-   TinyPNG-Unlimited.exe rearrange -h
-   ```
+### 压缩单个文件
 
+```bash
+python main.py file "path/to/image.png"
+python main.py file "path/to/image.jpg" -p http://127.0.0.1:7890
+```
 
+### 压缩文件夹
 
+```bash
+python main.py dir -d "path/to/images"          # 只压缩当前目录
+python main.py dir -d "path/to/images" -r        # 递归压缩所有子目录
+python main.py dir -d "path/to/images" -r -l     # 递归压缩并输出 log.json
+python main.py dir                               # 不传 -d 则运行时交互输入路径
+```
 
-## 截图
+### 批量任务（JSON 配置）
 
-<img src="https://pic1.imgdb.cn/item/636a58ea16f2c2beb165ee92.jpg" alt="image-20221108212239001" style="zoom:50%;" />
+```bash
+python main.py tasks "path/to/tasks.json"
+python main.py tasks "path/to/tasks.json" -r -l
+```
 
-<img src="https://pic1.imgdb.cn/item/636a592b16f2c2beb1664075.jpg" alt="image-20221108212228078" style="zoom:50%;" />
+`tasks.json` 格式：
 
-<img src="https://pic1.imgdb.cn/item/636a597c16f2c2beb166a678.jpg" style="zoom:50%;" />
+```json
+{
+    "file_tasks": ["D:\\img1.jpg", "D:\\img2.png"],
+    "dir_tasks":  ["D:\\folder1",  "D:\\folder2"]
+}
+```
+
+### 其他命令
+
+```bash
+python main.py rearrange            # 按剩余配额重新排列密钥顺序
+python main.py add_key "your_key"   # 手动添加一个 API 密钥
+python main.py --help               # 查看全部命令帮助
+python main.py dir --help           # 查看子命令帮助
+```
+
+---
+
+## 目录结构
+
+```text
+TinyPNG-Unlimited/
+├── main.py                    # 根目录入口（推荐使用）
+├── bin/
+│   ├── main.py                # 实际 CLI 逻辑（argparse）
+│   ├── keys.json              # 密钥存储（自动生成）
+│   └── debug_email.html       # 申请密钥时收到的确认邮件（用于调试）
+├── tinypng_unlimited/
+│   ├── __init__.py            # 日志初始化、导出 TinyImg / KeyManager
+│   ├── config.py              # 配置加载（env 文件 + 环境变量）
+│   ├── errors.py              # 异常类定义
+│   ├── apihz_mail.py          # 接口盒子临时邮箱客户端
+│   ├── key_manager.py         # 密钥生命周期管理
+│   └── tiny_img.py            # 压缩引擎（tinify 封装 + 线程池）
+├── config.env                 # 本地配置（不提交，需自行创建）
+├── config.env.template        # 配置模板
+└── requirements.txt
+```
+
+---
+
+## 工作原理
+
+```text
+启动
+ └─ KeyManager.init()
+      ├─ 从 config.env 或 keys.json 加载密钥
+      └─ 可用密钥 < KEY_THRESHOLD → 自动触发 apply
+
+apply（申请密钥）
+ └─ 对每个新密钥：
+      ├─ ApihzMail.create_new_mail()  →  创建临时邮箱（apihz.cn API）
+      ├─ POST tinypng.com/web/api     →  用临时邮箱注册 TinyPNG 账号
+      ├─ ApihzMail.get_email_list()   →  轮询收件箱（6s 间隔）
+      ├─ 提取激活链接（href 正则 + HTML 实体解码）
+      └─ 访问激活链接 → 获取 Bearer Token → 创建并读取 API Key
+
+压缩（dir / file / tasks）
+ └─ ThreadPoolExecutor（THREAD_NUM 个工作线程）
+      └─ 每个文件：
+           ├─ 检查末尾 4 字节是否为 b'tiny'（已压缩则跳过）
+           ├─ 加锁检查配额 → 配额 ≥ KEY_USAGE_LIMIT 时切换密钥
+           ├─ 上传 → api.tinify.com/shrink（带进度条）
+           ├─ 下载压缩后图片（带进度条）
+           └─ 追加 b'tiny' 标记 → 覆盖原文件
+```

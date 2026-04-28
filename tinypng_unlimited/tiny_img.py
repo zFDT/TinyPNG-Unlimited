@@ -12,7 +12,7 @@ from requests import Session
 from tqdm import tqdm
 from tqdm.utils import CallbackIOWrapper
 
-import tinypng_unlimited  # 不使用from import防止交叉引用
+import tinypng_unlimited  # 不使用 from import 防止循环引用
 from tinypng_unlimited.errors import CompressException
 
 
@@ -79,8 +79,7 @@ class TinyImg:
         检测密钥是否限额，限额则替换为下一条
         """
         count = cls.compression_count()
-        # logger.debug('当前密钥可用性: [{}/500]', count)
-        if count >= 490:  # 即将达到限额，更换新密钥（多线程，提前留好余量）
+        if count >= 490:  # 提前 10 次切换，为多线程并发留出余量
             logger.warning('当前密钥即将达到限额: [{}/500], 正在切换新密钥', count)
             cls.set_key(tinypng_unlimited.KeyManager.next_key())
 
@@ -128,10 +127,11 @@ class TinyImg:
         retry = 0
         while True:
             try:
-                # 加锁保证只有一个线程能进行检查（避免多线程同时检查，同时切换api）
-                # 但是切换密钥会中断其他请求，因为tinify库中是共享同一个client
+                # 加锁保证同一时刻只有一个线程检查配额并可能切换密钥。
+                # tinify 库内部共享单一 client，密钥切换会中断正在上传的其他线程请求，
+                # 因此先获取当前密钥值，上传完成后对比是否已被其他线程切换（见下方刷新逻辑）。
                 with cls._lock:
-                    cls.check_compression_count()  # 检验压缩次数是否足够
+                    cls.check_compression_count()
                     old_key = tinify.key
                 with tqdm(file=sys.stdout, desc=f'[上传进度]: {file_name}', colour='green', ncols=120, leave=False,
                           ascii=' ▇', total=old_size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
@@ -141,7 +141,8 @@ class TinyImg:
                         url = cls.upload_from_file(wrapped_file, timeout=upload_timeout)
                     # 上传完成得到图片链接，并更新了api调用次数
                     with cls._lock:
-                        # 新旧密钥切换时，使用旧密钥上传图片的响应会覆盖新密钥的值，所以需要刷新一下
+                        # 若上传过程中其他线程已切换了密钥，旧密钥的响应头会覆盖新密钥的
+                        # compression_count，需重新 validate 以获取正确计数。
                         if tinify.key != old_key:
                             tinify.validate()
                         logger.success('云端压缩成功，正在下载: {}', file_name)
@@ -177,8 +178,8 @@ class TinyImg:
 
         logger.info('待压缩图片数量: {}', file_num)
 
-        thread_num = 4
-        # 4核心理论可以8线程，但是上传速度才是决速步
+        from tinypng_unlimited.config import Config
+        thread_num = Config.THREAD_NUM
         with ThreadPoolExecutor(thread_num) as pool:
             with tqdm(desc='[任务进度]', unit='份', total=file_num, file=sys.stdout, ascii=' ▇',
                       colour='yellow', leave=False, ncols=120, position=thread_num) as bar:
