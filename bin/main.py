@@ -28,7 +28,19 @@ def init(proxy=None):
         logger.error('无可用密钥，请稍后重试')
         exit()
 
-    TinyImg.set_key(KeyManager.Keys.available[0])
+    # 依次尝试可用密钥，跳过无效密钥并移入 unavailable
+    for key in list(KeyManager.Keys.available):
+        try:
+            TinyImg.set_key(key)
+            break
+        except Exception as e:
+            logger.warning('密钥无效，已跳过: {}... ({})', key[:8], e)
+            KeyManager.Keys.available.remove(key)
+            KeyManager.Keys.unavailable.append(key)
+            KeyManager.store_key()
+    else:
+        logger.error('所有密钥均无效，请运行 apply 申请新密钥')
+        exit()
 
     if proxy is not None:
         TinyImg.set_proxy(proxy)
