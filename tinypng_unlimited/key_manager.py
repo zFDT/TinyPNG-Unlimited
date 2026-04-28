@@ -7,6 +7,7 @@ import requests
 from loguru import logger
 from requests import Timeout
 
+from tinypng_unlimited.config import Config
 from tinypng_unlimited.errors import SnapMailException, ApplyKeyException
 from tinypng_unlimited.snapmail import SnapMail
 
@@ -29,9 +30,19 @@ class KeyManager:
         密钥初始化，请在所有需要密钥的操作之前执行
         """
         cls.working_dir = working_dir
-        cls.load_keys()
-        if len(cls.Keys.available) < 3:
-            logger.warning('当前可用密钥少于3条，尝试申请新密钥')
+        
+        # 首先从环境变量加载 API Keys（如果配置了）
+        if Config.TINYPNG_API_KEYS:
+            logger.info('从环境变量加载 TinyPNG API Keys，共 {} 个', len(Config.TINYPNG_API_KEYS))
+            cls.Keys.load({'available': Config.TINYPNG_API_KEYS.copy(), 'unavailable': []})
+            cls.store_key()
+        else:
+            # 否则从本地文件加载
+            cls.load_keys()
+        
+        # 检查密钥数量，如果少于阈值则尝试申请新密钥
+        if len(cls.Keys.available) < Config.KEY_THRESHOLD:
+            logger.warning('当前可用密钥少于{}条，尝试申请新密钥', Config.KEY_THRESHOLD)
             cls.apply_store_key()
 
     @classmethod
@@ -149,7 +160,11 @@ class KeyManager:
             if res.status_code != 200 or res.text != '{}':
                 raise ApplyKeyException('新账号注册未知错误', res.text)
             logger.info('注册邮件已发送至:{}', mail)
-            time.sleep(5)  # 5s后开始
+            
+            # SnapMail 免费版要求 API 请求间隔至少 10 秒
+            # 等待足够时间让邮件到达，同时遵守 API 频率限制
+            logger.info('等待邮件到达（遵守 SnapMail 10s API 间隔限制）...')
+            time.sleep(12)  # 12秒，略大于最小间隔以确保安全
 
             # 接收邮件，提取链接
             try:
@@ -190,19 +205,38 @@ class KeyManager:
     def apply_store_key(cls, times=None):
         """
         申请并保存密钥
+        
+        注意：SnapMail 免费版限制：
+        - API 请求间隔至少 10 秒
+        - 24小时内同一个邮件主题最多50封邮件（所有用户统一计算）
+        - 邮件保存48小时
+        
+        因此批量申请时需要在每次申请之间增加足够的间隔时间。
         """
 
         # 允许申请次数（包括失败重试）
         times = 4 - len(cls.Keys.available) if times is None else times
-        while times > 0:
+        
+        for i in range(times):
             try:
-                times -= 1
-                logger.info('正在申请新密钥，剩余次数: {}', times)
+                logger.info('正在申请新密钥，进度: {}/{}', i + 1, times)
                 key = cls._apply_api_key()
                 cls.Keys.available.append(key)
                 cls.store_key()
+                logger.success('密钥申请成功，当前可用密钥数: {}', len(cls.Keys.available))
+                
+                # 如果还有剩余次数需要申请，等待足够时间以避免触发频率限制
+                # SnapMail 限制 24h 同主题 50 封邮件，建议每次申请间隔 30-60 秒
+                if i < times - 1:
+                    wait_time = 30  # 30秒间隔，平衡速度和安全性
+                    logger.info('等待 {} 秒后继续申请下一个密钥（避免触发 SnapMail 频率限制）...', wait_time)
+                    time.sleep(wait_time)
+                    
             except Timeout as e:
                 logger.error("请求超时: {} - {}({})", e.request.method, e.request.url, bytes.decode(e.request.content))
+                # 超时后也要等待一段时间再重试
+                if i < times - 1:
+                    time.sleep(15)
             except Exception as e:
                 logger.error('自动申请密钥失败: {}', e)
                 logger.warning('提示：您可以手动添加 TinyPNG API 密钥')

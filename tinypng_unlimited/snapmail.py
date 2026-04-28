@@ -9,6 +9,23 @@ from tinypng_unlimited.errors import SnapMailException
 class SnapMail:
     BASE_URL = 'https://www.snapmail.cc/'
     mail: str = None
+    _last_request_time: float = 0  # 记录最后一次 API 请求的时间
+    
+    @classmethod
+    def _ensure_rate_limit(cls):
+        """
+        确保遵守 SnapMail API 请求间隔限制（至少 10 秒）
+        """
+        import time
+        current_time = time.time()
+        elapsed = current_time - cls._last_request_time
+        
+        if elapsed < 10:
+            wait_time = 10 - elapsed
+            logger.debug(f'SnapMail API 频率限制：等待 {wait_time:.1f} 秒...')
+            time.sleep(wait_time)
+        
+        cls._last_request_time = time.time()
 
     @classmethod
     def create_new_mail(cls) -> str:
@@ -25,6 +42,9 @@ class SnapMail:
         """
         if cls.mail is None:
             cls.create_new_mail()
+
+        # 确保遵守 API 频率限制
+        cls._ensure_rate_limit()
 
         retry = 0
         while True:
@@ -57,6 +77,8 @@ class SnapMail:
                     if retry <= 3:
                         logger.info(f'等待10s后进行第{retry}次重试')
                         time.sleep(10)
+                        # 更新最后请求时间
+                        cls._last_request_time = time.time()
                     else:
                         raise SnapMailException('超过重试次数', 3)
                 else:
@@ -74,5 +96,7 @@ class SnapMail:
                     logger.error(f'请求异常: {e}')
                     logger.info(f'等待10s后进行第{retry}次重试')
                     time.sleep(10)
+                    # 更新最后请求时间
+                    cls._last_request_time = time.time()
                 else:
                     raise SnapMailException('超过重试次数', 3)
