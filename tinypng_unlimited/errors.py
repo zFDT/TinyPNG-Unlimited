@@ -12,13 +12,17 @@ class CustomException(Exception):
         self.detail = detail
 
 
-class SnapMailException(CustomException):
+class TempMailException(CustomException):
     """
-    接受邮件相关错误
+    临时邮箱服务相关错误
     """
 
     def __init__(self, msg: str, detail: Any = None):
-        super().__init__('接受邮件相关错误', msg, detail)
+        super().__init__('临时邮箱服务相关错误', msg, detail)
+
+
+# 向后兼容别名
+SnapMailException = TempMailException
 
 
 class ApplyKeyException(CustomException):

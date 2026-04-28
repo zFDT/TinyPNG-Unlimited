@@ -40,7 +40,8 @@ bin/main.py                   # argparse CLI entry point → 6 command handlers
 tinypng_unlimited/
   config.py                   # Config class: loads .env + env vars, typed accessors
   errors.py                   # Exception hierarchy (base: CustomException)
-  snapmail.py                 # SnapMail temp-email client (rate-limited to 10s intervals)
+  snapmail.py                 # [已删除，替换为 apihz_mail.py]
+  apihz_mail.py               # 接口盒子临时邮箱客户端（限速 6s/次，普通会员）
   key_manager.py              # API key lifecycle: load/save keys.json, auto-apply, rotate
   tiny_img.py                 # Compression engine: tinify wrapper, thread pool, progress bars
   __init__.py                 # Logger setup (loguru → tqdm), exports TinyImg + KeyManager
@@ -50,14 +51,14 @@ tinypng_unlimited/
 
 1. **Startup:** `KeyManager.init()` loads keys from `config.env` or `bin/keys.json`; if fewer than `KEY_THRESHOLD` (default 3) available keys, auto-triggers `apply`
 2. **Compression:** `TinyImg.compress_from_file_list()` runs a `ThreadPoolExecutor` (4 workers) over the file list; each worker checks quota via `check_compression_count()` under `RLock` and auto-rotates to the next key when count ≥ `KEY_USAGE_LIMIT` (490)
-3. **Key generation:** `_apply_api_key()` creates a SnapMail inbox → registers at tinypng.com → waits 12s → fetches confirmation email → activates via token → calls `/api/keys`
+3. **Key generation:** `_apply_api_key()` calls apihz.cn to create a temp mailbox → registers at tinypng.com → polls inbox (6s intervals) → extracts activation link → calls `/api/keys`
 4. **Idempotency:** Compressed files have `b'tiny'` appended as the last 4 bytes; re-runs skip them
 5. **Error recovery:** Failed files retry up to `MAX_RETRY` times in-session; persistent failures are written to `error_files.json` and retried on the next run
 
 ### Key Design Points
 
 - `TinyImg._lock` (RLock) guards key switching and quota checks across threads
-- SnapMail enforces a 10-second minimum between API calls via `_ensure_rate_limit()`
+- apihz.cn enforces 10 req/min for regular members; `ApihzMail._min_interval = 6.0s` is enforced via `_ensure_rate_limit()`
 - Key state persists across restarts in `bin/keys.json` (available + unavailable lists)
 - loguru is wired to write through `tqdm.write()` to avoid clobbering progress bars
 
@@ -68,7 +69,8 @@ Copy `config.env.template` to `config.env`. Key variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TINYPNG_API_KEYS` | _(empty)_ | Pre-seeded API keys (comma-separated) |
-| `SNAPMAIL_API_KEY` | _(empty)_ | **Required** for auto-applying keys — get from snapmail.cc "My Account" |
+| `APIHZ_ID` | _(empty)_ | **Required** for auto-applying keys — apihz.cn developer ID |
+| `APIHZ_KEY` | _(empty)_ | **Required** for auto-applying keys — apihz.cn developer key |
 | `HTTP_PROXY` / `HTTPS_PROXY` | _(empty)_ | Proxy for all outbound requests |
 | `THREAD_NUM` | `4` | Concurrent compression workers |
 | `KEY_THRESHOLD` | `3` | Min available keys before auto-apply |

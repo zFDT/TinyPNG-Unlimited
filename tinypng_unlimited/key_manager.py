@@ -8,8 +8,8 @@ from loguru import logger
 from requests import Timeout
 
 from tinypng_unlimited.config import Config
-from tinypng_unlimited.errors import SnapMailException, ApplyKeyException
-from tinypng_unlimited.snapmail import SnapMail
+from tinypng_unlimited.errors import TempMailException, ApplyKeyException
+from tinypng_unlimited.apihz_mail import ApihzMail
 
 
 class KeyManager:
@@ -145,58 +145,71 @@ class KeyManager:
     @classmethod
     def _apply_api_key(cls) -> str:
         """
-        申请新密钥
+        申请新密钥：
+        1. 通过接口盒子创建临时邮箱
+        2. 向 TinyPNG 注册该邮箱（触发确认邮件）
+        3. 轮询临时邮箱，提取激活链接
+        4. 访问激活链接，生成并获取新 API Key
         """
+        if not Config.APIHZ_ID or not Config.APIHZ_KEY:
+            raise ApplyKeyException('未配置 APIHZ_ID / APIHZ_KEY，无法自动申请密钥', None)
+
         with requests.Session() as session:
-            # 注册新账号（发送确认邮件）
-            mail = SnapMail.create_new_mail()
+            # 创建临时邮箱（消耗 1 次 apihz 调用）
+            try:
+                mail = ApihzMail.create_new_mail(session)
+            except Exception as e:
+                raise ApplyKeyException('创建临时邮箱失败', e)
+
+            # 向 TinyPNG 注册，触发确认邮件
             res = session.post('https://tinypng.com/web/api', json={
                 "fullName": mail[:mail.find('@')],
                 "mail": mail
             })
-
             if res.status_code == 429:
                 raise ApplyKeyException('新账号注册过于频繁', res.text)
             if res.status_code != 200 or res.text != '{}':
                 raise ApplyKeyException('新账号注册未知错误', res.text)
-            logger.info('注册邮件已发送至:{}', mail)
-            
-            # SnapMail 免费版要求 API 请求间隔至少 10 秒
-            # 等待足够时间让邮件到达，同时遵守 API 频率限制
-            logger.info('等待邮件到达（遵守 SnapMail 10s API 间隔限制）...')
-            time.sleep(12)  # 12秒，略大于最小间隔以确保安全
+            logger.info('注册邮件已发送至: {}', mail)
 
-            # 接收邮件，提取链接
+            # 等待邮件到达后轮询（普通会员 6s 间隔，最多等待 ~60s）
+            logger.info('等待确认邮件到达（最多重试 {}s）...', ApihzMail._min_interval * 4)
+            time.sleep(ApihzMail._min_interval)  # 先等一个间隔再开始读
+
+            # 接收邮件，提取激活链接
             try:
-                res_json: dict = SnapMail.get_email_list(session, 1)
-                match = re.search(r'(https://tinify.com/login\?token=.*?api)', res_json[0]['text'])
+                emails = ApihzMail.get_email_list(session, 1)
+                text = emails[0].get('text', '')
+                match = re.search(r'(https://tinify\.com/login\?token=.*?api)', text)
+                if not match:
+                    # 部分邮件客户端换行，尝试从 HTML 中提取
+                    html = emails[0].get('html', '')
+                    match = re.search(r'href=["\']?(https://tinify\.com/login\?token=[^"\'>\s]+)', html)
+                if not match:
+                    raise ApplyKeyException('激活链接提取失败，邮件内容：' + text[:200], None)
                 url = match.group(1)
-            except SnapMailException as e:
-                raise ApplyKeyException('注册邮件接收失败', e)
-            except Exception as e:
-                raise ApplyKeyException('注册链接提取失败', e)
-            logger.info('注册链接提取成功')
+            except TempMailException as e:
+                raise ApplyKeyException('确认邮件接收失败', e)
+            logger.info('激活链接提取成功')
 
-            # 访问控制台，生成密钥
+            # 访问激活链接，生成密钥
             retry = 0
             while True:
                 try:
                     session.get(url)
-                    auth = (session.get('https://tinify.com/web/session')).json()['token']  # 获取鉴权
-                    headers = {
-                        'authorization': f"Bearer {auth}"
-                    }
-                    session.post('https://api.tinify.com/api/keys', headers=headers)  # 添加新密钥
-                    res = session.get('https://api.tinify.com/api', headers=headers)  # 获取密钥
+                    auth = session.get('https://tinify.com/web/session').json()['token']
+                    headers = {'authorization': f'Bearer {auth}'}
+                    session.post('https://api.tinify.com/api/keys', headers=headers)
+                    res = session.get('https://api.tinify.com/api', headers=headers)
                     key = res.json()['keys'][-1]['key']
                     break
                 except Exception as e:
                     retry += 1
                     if retry <= 3:
-                        logger.error('新密钥生成失败, 3s后进行第{}次重试 {}', retry, e)
+                        logger.error('密钥生成失败，3s 后第 {} 次重试: {}', retry, e)
                         time.sleep(3)
                     else:
-                        raise ApplyKeyException(f'超出重试次数, 新密钥生成失败: {url}', e)
+                        raise ApplyKeyException(f'超出重试次数，密钥生成失败: {url}', e)
 
             logger.success('新密钥生成成功')
             return key
@@ -204,19 +217,15 @@ class KeyManager:
     @classmethod
     def apply_store_key(cls, times=None):
         """
-        申请并保存密钥
-        
-        注意：SnapMail 免费版限制：
-        - API 请求间隔至少 10 秒
-        - 24小时内同一个邮件主题最多50封邮件（所有用户统一计算）
-        - 邮件保存48小时
-        
-        因此批量申请时需要在每次申请之间增加足够的间隔时间。
+        申请并保存密钥。
+
+        普通会员每分钟限 10 次 API 调用（6s 间隔），
+        批量申请时每两次之间等待一个额外间隔，避免触发频率限制。
         """
 
         # 允许申请次数（包括失败重试）
         times = 4 - len(cls.Keys.available) if times is None else times
-        
+
         for i in range(times):
             try:
                 logger.info('正在申请新密钥，进度: {}/{}', i + 1, times)
@@ -224,17 +233,15 @@ class KeyManager:
                 cls.Keys.available.append(key)
                 cls.store_key()
                 logger.success('密钥申请成功，当前可用密钥数: {}', len(cls.Keys.available))
-                
-                # 如果还有剩余次数需要申请，等待足够时间以避免触发频率限制
-                # SnapMail 限制 24h 同主题 50 封邮件，建议每次申请间隔 30-60 秒
+
                 if i < times - 1:
-                    wait_time = 30  # 30秒间隔，平衡速度和安全性
-                    logger.info('等待 {} 秒后继续申请下一个密钥（避免触发 SnapMail 频率限制）...', wait_time)
+                    from tinypng_unlimited.apihz_mail import ApihzMail
+                    wait_time = ApihzMail._min_interval * 2  # 两个间隔，保守策略
+                    logger.info('等待 {:.0f}s 后继续申请下一个密钥...', wait_time)
                     time.sleep(wait_time)
-                    
+
             except Timeout as e:
                 logger.error("请求超时: {} - {}({})", e.request.method, e.request.url, bytes.decode(e.request.content))
-                # 超时后也要等待一段时间再重试
                 if i < times - 1:
                     time.sleep(15)
             except Exception as e:

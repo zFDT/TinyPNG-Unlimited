@@ -112,8 +112,9 @@ class Config:
     KEY_THRESHOLD: int = 3
     KEY_USAGE_LIMIT: int = 490
 
-    # SnapMail API Key
-    SNAPMAIL_API_KEY: Optional[str] = None
+    # 接口盒子（apihz.cn）临时邮箱凭据（用于自动申请 TinyPNG 密钥）
+    APIHZ_ID: str = ''
+    APIHZ_KEY: str = ''
     
     @classmethod
     def load(cls, env_file: str = None):
@@ -149,8 +150,9 @@ class Config:
         cls.KEY_THRESHOLD = get_env_int('KEY_THRESHOLD', 3)
         cls.KEY_USAGE_LIMIT = get_env_int('KEY_USAGE_LIMIT', 490)
 
-        # SnapMail API Key
-        cls.SNAPMAIL_API_KEY = get_env_str('SNAPMAIL_API_KEY')
+        # 接口盒子（apihz.cn）临时邮箱凭据
+        cls.APIHZ_ID = get_env_str('APIHZ_ID', '')
+        cls.APIHZ_KEY = get_env_str('APIHZ_KEY', '')
     
     @classmethod
     def get_proxy(cls) -> Optional[str]:
