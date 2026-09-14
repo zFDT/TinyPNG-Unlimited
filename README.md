@@ -1,6 +1,6 @@
 # TinyPNG-Unlimited
 
-> 半自动申请 API 密钥、多线程、带进度条的 TinyPNG 批量云压缩工具（图形界面 + 命令行）
+> 内置密钥注册向导（人工过一次验证码）、多线程、带进度条的 TinyPNG 批量云压缩工具（图形界面 + 命令行）
 >
 > 本项目仅供技术研究使用，请勿用于任何商业及非法用途，任何后果作者概不负责。
 
@@ -99,7 +99,7 @@ cp config.env.template config.env
 | `PROXY_LIST` | 空 | 代理列表（逗号/分号/换行分隔），设置后覆盖单条代理，见下文 |
 | `LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `THREAD_NUM` | `4` | 并发压缩线程数。连接池会按 `max(16, THREAD_NUM×2)` 自动放大，建议 16~24 |
-| `KEY_THRESHOLD` | `3` | 可用密钥少于此数量时给出提示；**该阈值当前不再触发自动申请**（自动申请链路已失效，只会打一条告警并提示手动添加，见下文） |
+| `KEY_THRESHOLD` | `3` | 可用密钥少于此数量时给出提醒；**该阈值只用于提醒，不再触发自动申请**（自动申请链路已失效，见下文） |
 | `KEY_USAGE_LIMIT` | `490` | 单密钥使用次数上限（达到后切换，TinyPNG 限 500/月） |
 | `UPLOAD_TIMEOUT` | `60` | 上传超时时间（秒） |
 | `DOWNLOAD_TIMEOUT` | `30` | 下载超时时间（秒） |
@@ -220,13 +220,15 @@ python main.py          # 等价于 python main.py gui
 
 ### 申请 API 密钥
 
-> ⚠️ **命令行 `apply` 已失效，不要再用了。**
+> ⚠️ **命令行 `apply` 已停用。** 它现在只打印一段引导文案、以退出码 1 结束，不再发任何网络请求
+> （保留子命令只是为了不破坏已有脚本）。
 > TinyPNG 在 2026-09 改版了注册链路，用真账号完整实测确认：
 > 旧的**自动注册接口**与**取 Token 接口**现在都返回 **404，已死**；
 > `https://api.tinify.com` 又**不吃网页登录 cookie**——即使账号里已经有 key，
 > 请求也一律 401 `{"error":"unauthorized","message":"Access token is invalid"}`；
 > 而控制台 `https://tinify.com/dashboard/api` 是**纯客户端渲染**（登录前后 HTML 字节数一样），key 不在 HTML 里。
-> 结论：**程序无法自动读取 API Key，必须人在网页上复制**，旧的「自动申请密钥」路径整体失效。
+> 结论：**程序无法自动读取 API Key，必须人在网页上复制**；旧的「自动申请密钥」路径整体失效，
+> 现在密钥不足时（含 `init()` 启动检查和压缩中切换密钥）都**只打一条提醒，不再尝试申请**。
 
 现在请在**图形界面的「密钥」页**操作：点「**手动注册（过验证码）**」，跟着向导走完即可
 （完整流程见下方「工作原理」里的「手动注册」流程图）。
@@ -326,7 +328,7 @@ TinyPNG-Unlimited/
 压缩（dir / file / tasks / GUI）
  └─ KeyManager.init()
       ├─ 从 config.env 或 keys.json 加载密钥
-      └─ 可用密钥 < KEY_THRESHOLD → 仅告警提示（自动申请已失效，不会真的去申请）
+      └─ 可用密钥 < KEY_THRESHOLD → 仅提醒（阈值不再触发自动申请）
  └─ ThreadPoolExecutor（THREAD_NUM 个工作线程）
       └─ 每个文件：
            ├─ 检查末尾 4 字节是否为 b'tiny'（已压缩则跳过）

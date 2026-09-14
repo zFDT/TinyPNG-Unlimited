@@ -66,7 +66,29 @@ jobs:
           python -c "import tkinterdnd2, os; print('tkinterdnd2 OK:', os.path.dirname(tkinterdnd2.__file__))"
 
       - name: 源码冒烟（先确认逻辑本身没问题）
-        run: python bin/main.py --version
+        shell: bash
+        run: |
+          # 失败时把退出码和现场一起打出来，省得下次靠猜：
+          # Windows 的 stdout 是管道时用的是 ANSI 代码页（英文 runner cp1252），
+          # 打印中文会 UnicodeEncodeError，这在 mac / Linux 的 UTF-8 locale 下不会复现。
+          echo "PYTHONIOENCODING=${PYTHONIOENCODING:-<unset>}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "控制台代码页: $(chcp.com 2>/dev/null || chcp 2>/dev/null || echo '<unknown>')"
+          fi
+          set +e
+          OUT=$(python bin/main.py --version 2>&1)
+          RC=$?
+          set -e
+          echo "退出码: $RC"
+          echo "输出: $OUT"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::源码冒烟失败（退出码 $RC），见上方输出"
+            exit "$RC"
+          fi
+          case "$OUT" in
+            *TinyPNG-Unlimited*) ;;
+            *) echo "::error::源码冒烟输出里没有版本号: $OUT"; exit 1 ;;
+          esac
 
       - name: 打包
         run: pyinstaller --clean --noconfirm TinyPNG-Unlimited.spec

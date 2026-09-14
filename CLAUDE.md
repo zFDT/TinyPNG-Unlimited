@@ -35,7 +35,7 @@ python bin/main.py <command> [options]
 python bin/main.py file "path/to/image.jpg"           # compress single file
 python bin/main.py dir [-d DIR] [-p PROXY] [-r] [-l]  # compress directory
 python bin/main.py tasks "tasks.json" [-r] [-l]        # batch from JSON
-python bin/main.py apply [NUM]                          # generate N new API keys
+python bin/main.py apply [NUM]                          # DEPRECATED: prints guidance, exits 1
 python bin/main.py rearrange                            # sort keys by quota remaining
 python bin/main.py add_key "api_key_here"              # manually add a key
 python bin/main.py --version                            # print version (from version.py)
@@ -72,7 +72,7 @@ tinypng_unlimited/
   gui_state.json              # 运行期生成：窗口几何 + 上次的选项开关（.gitignore）
   errors.py                   # Exception hierarchy (base: CustomException)
   apihz_mail.py               # 接口盒子临时邮箱客户端（限速 6s/次，普通会员）
-  key_manager.py              # API key lifecycle: load/save keys.json, auto-apply, rotate
+  key_manager.py              # API key lifecycle: load/save keys.json, manual signup, rotate
   tiny_img.py                 # Compression engine: tinify wrapper, thread pool, progress bars
   __init__.py                 # Logger setup (loguru → tqdm), exports TinyImg + KeyManager + __version__
 ```
@@ -88,9 +88,9 @@ PyInstaller 打包后是 **exe 所在目录**。不要改回用 `__file__` 推�
 
 ### Data Flow
 
-1. **Startup:** `KeyManager.init()` loads keys from `config.env` or `<workdir>/keys.json`; if fewer than `KEY_THRESHOLD` (default 3) available keys, auto-triggers `apply`
+1. **Startup:** `KeyManager.init()` loads keys from `config.env` or `<workdir>/keys.json`; if fewer than `KEY_THRESHOLD` (default 3) available keys, it **only warns** — auto-apply is dead (see key note below)
 2. **Compression:** `TinyImg.compress_from_file_list()` runs a `ThreadPoolExecutor` (THREAD_NUM workers) over the file list; each worker checks quota via `check_compression_count()` under `RLock` and auto-rotates to the next key when count ≥ `KEY_USAGE_LIMIT` (490)
-3. **Key generation:** `_apply_api_key()` calls apihz.cn to create a temp mailbox → registers at tinypng.com → polls inbox (6s intervals) → extracts activation link → calls `/api/keys`
+3. **Key generation:** auto-apply was **removed** (`_apply_api_key()` / `apply_store_key()` are gone). Only path now: `begin_manual_signup()` → human passes the captcha in the browser → `ManualSignup.activate()` → human copies the key → GUI "paste API key" dialog. `bin/main.py apply` is kept only for script compatibility; it prints guidance and exits 1.
 4. **Idempotency:** Compressed files have `b'tiny'` appended as the last 4 bytes; re-runs skip them
 5. **Error recovery:** Failed files retry up to `MAX_RETRY` times in-session; persistent failures are written to `error_files.json` and retried on the next run
 
@@ -208,12 +208,12 @@ packaged). The GUI's 设置 page edits it in place; you can also edit it by hand
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TINYPNG_API_KEYS` | _(empty)_ | Pre-seeded API keys (comma-separated) |
-| `APIHZ_ID` | _(empty)_ | **Required** for auto-applying keys — apihz.cn developer ID |
-| `APIHZ_KEY` | _(empty)_ | **Required** for auto-applying keys — apihz.cn developer key |
+| `APIHZ_ID` | _(empty)_ | **Required** for manual signup — apihz.cn developer ID |
+| `APIHZ_KEY` | _(empty)_ | **Required** for manual signup — apihz.cn developer key |
 | `HTTP_PROXY` / `HTTPS_PROXY` | _(empty)_ | Single proxy for all outbound requests (upload **and** download) |
 | `PROXY_LIST` | _(empty)_ | Comma/semicolon/newline-separated proxy list; overrides the single proxy. Threads bind stickily to one entry each; 3 consecutive failures quarantine a proxy for 60s |
 | `THREAD_NUM` | `4` | Concurrent compression workers; the connection pool auto-scales to `max(16, THREAD_NUM×2)`, 16–24 is the sweet spot |
-| `KEY_THRESHOLD` | `3` | Min available keys before auto-apply |
+| `KEY_THRESHOLD` | `3` | Warn when available keys drop below this; no longer triggers auto-apply |
 | `KEY_USAGE_LIMIT` | `490` | Compressions per key before rotation |
 | `MAX_RETRY` | `3` | Per-file retry attempts |
 | `UPLOAD_TIMEOUT` | `60` | Seconds for tinify upload |

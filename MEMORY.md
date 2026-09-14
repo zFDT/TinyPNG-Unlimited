@@ -33,7 +33,8 @@
   需要 `APIHZ_ID` / `APIHZ_KEY`；普通会员限速 **6 秒/次**，由 `_ensure_rate_limit()` 统一拦截。
 - 密钥状态持久化在 `<工作目录>/keys.json`（`available` / `unavailable` 两个列表）。
   老版本的 `bin/keys.json` 由 `KeyManager._migrate_legacy_keys()` 一次性搬过去（非覆盖）。
-- 可用密钥数少于 `KEY_THRESHOLD`（默认 3）时自动申请新密钥。
+- 可用密钥数少于 `KEY_THRESHOLD`（默认 3）时**只打提醒，不再自动申请**
+  （2026-09 起注册加验证码，自动申请链路已删：`_apply_api_key()` / `apply_store_key()`）。
 - 单密钥用量达到 `KEY_USAGE_LIMIT`（默认 490，TinyPNG 上限 500/月）时切换到下一条。
 - **配额按内容计，不按请求数计**：同一份字节重复上传不增加 `compression-count`（服务端按内容缓存），
   不同内容才 +1。
