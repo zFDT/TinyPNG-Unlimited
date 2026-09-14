@@ -26,6 +26,21 @@ class TinyImg:
     _tmp_seq = count()         # 临时文件唯一后缀，避免同名文件并发写入互相覆盖
     tmp_dir: str
 
+    # ---------------- 代理池 ----------------
+    # TinyPNG 按出口 IP 限流（实测单 IP 约 11.65 请求/秒），把请求分散到多个出口 IP
+    # 可以突破单 IP 的上限。这里的策略是：
+    #   · 每个工作线程粘性绑定一条代理（保住该出口上的长连接复用）
+    #   · 连续失败达阈值的代理临时隔离，线程自动改走其他代理
+    PROXY_FAIL_THRESHOLD: int = 3   # 连续失败多少次后隔离该代理
+    PROXY_COOLDOWN: int = 60        # 隔离时长（秒）
+
+    _proxies: list = []             # 规范化后的代理池；空列表表示直连
+    _proxy_lock: RLock = RLock()
+    _thread_proxy: dict = {}        # 线程 id -> 代理地址
+    _proxy_fail: dict = {}          # 代理地址 -> 连续失败次数
+    _proxy_until: dict = {}         # 代理地址 -> 隔离截止时间戳
+    _proxy_cursor: int = 0          # 轮转分配游标
+
     @classmethod
     def ensure_session_pool(cls, size: int = None) -> int:
         """
@@ -39,8 +54,11 @@ class TinyImg:
 
         本程序里有两条独立的 HTTP 通道，两者都要放大：
           - 下载走 cls._session
-          - 上传走 tinify 库自己的 client.session（tinify.key 每次变更都会重建
-            Client 与 Session，所以每次都要按对象身份重新挂载）
+          - 上传走 tinify 库自己的 client.session（tinify.key / tinify.proxy 每次变更
+            都会重建 Client 与 Session，所以每次都要按对象身份重新挂载）
+
+        走代理时 requests 会为「每条代理」各建一个 ProxyManager，其连接池大小同样
+        取自这里的 _pool_maxsize，所以放大一次即可覆盖全部分支。
 
         :param size: 池大小，默认按 THREAD_NUM 推算
         :return: 实际生效的池大小
@@ -84,9 +102,120 @@ class TinyImg:
             logger.success('密钥已载入，当前密钥可用性: [{}/500]', cls.compression_count())
             cls.check_compression_count()
 
+    # ---------------- 代理池：归一化与挑选 ----------------
+
+    @staticmethod
+    def normalize_proxies(proxy) -> list:
+        """
+        把代理配置归一化成列表。
+        :param proxy: None / 单个代理字符串 / 代理列表；字符串支持逗号、分号、
+                      换行、空格混合分隔
+        :return: 代理地址列表，空列表表示直连
+        """
+        if proxy is None:
+            return []
+        if isinstance(proxy, str):
+            raw = proxy.replace('\r', '\n')
+            for sep in (';', '\n', '\t', ' '):
+                raw = raw.replace(sep, ',')
+            return [item.strip() for item in raw.split(',') if item.strip()]
+        return [str(item).strip() for item in proxy if str(item).strip()]
+
+    @staticmethod
+    def proxy_pair(proxy) -> dict:
+        """
+        转成 requests 的 proxies 参数；http 与 https 都走同一出口。
+        :param proxy: 代理地址，None 表示直连
+        :return: proxies 字典
+        """
+        return {'http': proxy, 'https': proxy} if proxy else {}
+
     @classmethod
     def set_proxy(cls, proxy):
-        tinify.proxy = proxy
+        """
+        设置代理。支持三种写法：
+          · 单个代理：'http://127.0.0.1:7890'
+          · 多个代理：'http://127.0.0.1:7891,http://127.0.0.1:7892'
+          · 列表：['http://127.0.0.1:7891', 'socks5://127.0.0.1:7892']
+        传 None 或空值表示直连。
+
+        配置多个代理时，各工作线程会粘性分配到其中一条，可用于把请求分散到多个
+        出口 IP。
+
+        :param proxy: 代理配置
+        """
+        proxies = cls.normalize_proxies(proxy)
+        with cls._proxy_lock:
+            cls._proxies = proxies
+            cls._thread_proxy.clear()
+            cls._proxy_fail.clear()
+            cls._proxy_until.clear()
+            cls._proxy_cursor = 0
+            # tinify 库只接受单条代理，这里写入第一条作为兜底（例如 validate() 走的请求），
+            # 真正的多代理分流由 _pick_proxy() 逐请求覆盖。
+            # 注意 tinify.proxy 的 setter 会把 _client 置空并在下次 get_client() 时重建，
+            # 已挂载的连接池随之丢失，因此必须在它之后重新挂载。
+            tinify.proxy = proxies[0] if proxies else None
+            # 下载通道也必须带上代理：旧实现只设了 tinify.proxy，而下载走的是
+            # cls._session，结果是「上传走代理、下载却直连」。
+            cls._session.proxies = cls.proxy_pair(proxies[0]) if proxies else {}
+            cls.ensure_session_pool()
+        if proxies:
+            logger.info('已启用代理 {} 条: {}', len(proxies), ', '.join(proxies))
+        else:
+            logger.debug('未配置代理，将直连 TinyPNG')
+
+    @classmethod
+    def _pick_proxy(cls):
+        """
+        为当前线程挑选一条代理：粘性绑定优先，其次轮转分配，跳过处于隔离期的代理。
+        :return: 代理地址；代理池为空时返回 None（直连）
+        """
+        with cls._proxy_lock:
+            pool = cls._proxies
+            if not pool:
+                return None
+            now = time.time()
+            tid = get_ident()
+
+            current = cls._thread_proxy.get(tid)
+            if current and cls._proxy_until.get(current, 0.0) <= now:
+                return current  # 粘性：同一线程尽量一直走同一出口，保住长连接
+
+            usable = [p for p in pool if cls._proxy_until.get(p, 0.0) <= now]
+            if not usable:
+                # 全被隔离时退化为最早恢复的那一条，避免整体不可用
+                usable = sorted(pool, key=lambda p: cls._proxy_until.get(p, 0.0))[:1]
+                logger.warning('所有代理均在隔离期，临时复用: {}', usable[0])
+
+            chosen = usable[cls._proxy_cursor % len(usable)]
+            cls._proxy_cursor += 1
+            cls._thread_proxy[tid] = chosen
+            logger.debug('线程 {} 绑定代理: {}', tid, chosen)
+            return chosen
+
+    @classmethod
+    def _note_proxy(cls, proxy, ok: bool):
+        """
+        记录某次请求的代理使用结果；连续失败达阈值则临时隔离该代理。
+        :param proxy: 本次使用的代理，None 表示直连
+        :param ok: 是否成功
+        """
+        if not proxy:
+            return
+        with cls._proxy_lock:
+            if ok:
+                cls._proxy_fail.pop(proxy, None)
+                return
+            fails = cls._proxy_fail.get(proxy, 0) + 1
+            cls._proxy_fail[proxy] = fails
+            if fails >= cls.PROXY_FAIL_THRESHOLD:
+                cls._proxy_fail[proxy] = 0
+                cls._proxy_until[proxy] = time.time() + cls.PROXY_COOLDOWN
+                # 解除绑定，让用到这条代理的线程下次重新挑选
+                cls._thread_proxy = {t: p for t, p in cls._thread_proxy.items() if p != proxy}
+                logger.warning('代理连续失败 {} 次，已隔离 {} 秒: {}',
+                               cls.PROXY_FAIL_THRESHOLD, cls.PROXY_COOLDOWN, proxy)
 
     @classmethod
     def to_file_save(cls, path, url, timeout=30):
@@ -105,18 +234,25 @@ class TinyImg:
         # 并发越高、文件越多，撞上的概率越大，所以这是提高并发前必须先修的一处。
         token = f'{os.getpid()}_{get_ident()}_{next(cls._tmp_seq)}'
         tmp_path = os.path.abspath(os.path.join(cls.tmp_dir, f'{file_name}.{token}.part'))
+        proxy = cls._pick_proxy()
         try:
-            res = cls._session.get(url, stream=True, timeout=timeout)
-            file_size = int(res.headers.get('content-length', 0))
-            with tqdm(file=sys.stdout, desc=f'[下载进度]: {file_name}', colour='red', ncols=120, leave=False,
-                      ascii=' ▇', total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
-                with open(tmp_path, 'wb') as f:
-                    wrapped_file = CallbackIOWrapper(bar.update, f, 'write')
-                    for data in res.iter_content(2048):
-                        wrapped_file.write(data)
-                    f.write(b'tiny')
-                    logger.info('已为图片添加压缩标记tiny: {}', file_name)
-            move(tmp_path, path)
+            try:
+                res = cls._session.get(url, stream=True, timeout=timeout,
+                                       proxies=cls.proxy_pair(proxy))
+                file_size = int(res.headers.get('content-length', 0))
+                with tqdm(file=sys.stdout, desc=f'[下载进度]: {file_name}', colour='red', ncols=120, leave=False,
+                          ascii=' ▇', total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
+                    with open(tmp_path, 'wb') as f:
+                        wrapped_file = CallbackIOWrapper(bar.update, f, 'write')
+                        for data in res.iter_content(2048):
+                            wrapped_file.write(data)
+                        f.write(b'tiny')
+                        logger.info('已为图片添加压缩标记tiny: {}', file_name)
+                move(tmp_path, path)
+                cls._note_proxy(proxy, True)
+            except Exception:
+                cls._note_proxy(proxy, False)
+                raise
         finally:
             # 下载/写入失败时清掉残留临时文件，避免 tmp 目录堆积
             if os.path.exists(tmp_path):
@@ -171,7 +307,14 @@ class TinyImg:
         :return: (location, meta) —— meta 为解析后的 dict，解析失败时为空 dict
         """
         s: Session = tinify.get_client().session
-        res = s.post('https://api.tinify.com/shrink', data=f, timeout=timeout)
+        proxy = cls._pick_proxy()
+        try:
+            res = s.post('https://api.tinify.com/shrink', data=f, timeout=timeout,
+                         proxies=cls.proxy_pair(proxy))
+        except Exception:
+            cls._note_proxy(proxy, False)
+            raise
+        cls._note_proxy(proxy, True)
         count = res.headers.get('compression-count')
         if count is not None:  # 4xx 等异常响应可能不带该头，避免 int(None) 直接抛 TypeError
             tinify.compression_count = int(count)

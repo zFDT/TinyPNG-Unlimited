@@ -14,6 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(cur_file_path), '..
 os.system('title=TinyPng无限制压缩图片')
 
 from tinypng_unlimited import KeyManager, TinyImg
+from tinypng_unlimited.config import Config
 
 
 def init(proxy=None):
@@ -42,7 +43,12 @@ def init(proxy=None):
         logger.error('所有密钥均无效，请运行 apply 申请新密钥')
         exit()
 
-    if proxy is not None:
+    # 代理优先级：命令行 --proxy > config.env 的 PROXY_LIST / HTTPS_PROXY / HTTP_PROXY。
+    # 旧实现只在传了 --proxy 时才设置代理，config.env 里配的代理只对「申请密钥」生效，
+    # 压缩本身其实是直连的，这里一并修掉。
+    if proxy is None:
+        proxy = Config.get_proxy_list()
+    if proxy:
         TinyImg.set_proxy(proxy)
 
     logger.success('TinyPng初始化成功')

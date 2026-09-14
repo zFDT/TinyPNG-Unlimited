@@ -92,6 +92,8 @@ class Config:
     # 代理设置
     HTTP_PROXY: Optional[str] = None
     HTTPS_PROXY: Optional[str] = None
+    # 多代理列表（原始字符串，分隔符见 Config.get_proxy_list）
+    PROXY_LIST: str = ''
     
     # 日志配置
     LOG_LEVEL: str = 'INFO'
@@ -130,6 +132,7 @@ class Config:
         # 代理设置
         cls.HTTP_PROXY = get_env_str('HTTP_PROXY')
         cls.HTTPS_PROXY = get_env_str('HTTPS_PROXY')
+        cls.PROXY_LIST = get_env_str('PROXY_LIST', '')
         
         # 日志配置
         cls.LOG_LEVEL = get_env_str('LOG_LEVEL', 'INFO')
@@ -157,10 +160,32 @@ class Config:
     @classmethod
     def get_proxy(cls) -> Optional[str]:
         """
-        获取代理设置（优先使用 HTTPS_PROXY，其次 HTTP_PROXY）
+        获取单条代理设置（优先使用 HTTPS_PROXY，其次 HTTP_PROXY）
         :return: 代理地址
         """
         return cls.HTTPS_PROXY or cls.HTTP_PROXY
+
+    @classmethod
+    def get_proxy_list(cls) -> List[str]:
+        """
+        获取代理列表，用于把上传/下载分散到多个出口 IP。
+
+        PROXY_LIST 支持逗号、分号、换行、空格混合分隔，例如：
+            PROXY_LIST=http://127.0.0.1:7891,http://127.0.0.1:7892
+            PROXY_LIST=socks5://127.0.0.1:7891; http://127.0.0.1:7892
+
+        未配置 PROXY_LIST 时，回退为单条代理（HTTPS_PROXY > HTTP_PROXY），
+        以保持与旧配置的兼容。
+        :return: 代理地址列表；空列表表示直连
+        """
+        raw = (cls.PROXY_LIST or '').replace('\r', '\n')
+        for sep in (';', '\n', '\t', ' '):
+            raw = raw.replace(sep, ',')
+        items = [item.strip() for item in raw.split(',') if item.strip()]
+        if items:
+            return items
+        single = cls.get_proxy()
+        return [single] if single else []
 
 
 # 自动加载配置（在模块导入时执行）
