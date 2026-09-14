@@ -3,23 +3,146 @@
 支持从环境变量和 .env 文件加载配置
 """
 import os
+import re
+import shutil
+import sys
 from dotenv import load_dotenv
 from typing import Optional, List
 
 
-def load_config(env_file: str = None):
+def get_app_dir() -> str:
+    """
+    返回「用户可见的工作目录」——放 config.env 的地方。
+
+    - 源码运行：项目根目录
+    - PyInstaller 打包后：**exe 所在目录**
+
+    这里不能用 __file__ 推导：onefile 模式下 __file__ 指向运行时的临时解包目录
+    （sys._MEIPASS），于是放在 exe 旁边的 config.env 永远读不到，
+    而打包进产物的 config.env.template 又藏在临时目录里、用户改不到。
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def ensure_config_file() -> Optional[str]:
+    """
+    确保工作目录下存在 config.env，不存在则从模板复制一份。
+
+    这样打包后的产物开箱即可用：用户直接在 exe 旁边编辑 config.env，
+    不需要自己去「生成 .env」。
+    :return: 本次新建的 config.env 路径；无需创建或创建失败时返回 None
+    """
+    target = os.path.join(get_app_dir(), 'config.env')
+    if os.path.exists(target):
+        return None
+    # 打包后模板在解包目录里；源码运行时模板就在工作目录
+    for src in (os.path.join(getattr(sys, '_MEIPASS', '') or '', 'config.env.template'),
+                os.path.join(get_app_dir(), 'config.env.template')):
+        if src and os.path.exists(src):
+            try:
+                shutil.copyfile(src, target)
+                return target
+            except OSError:  # 例如 exe 被放在 Program Files 等不可写目录
+                return None
+    return None
+
+
+def load_config(env_file: str = None, override: bool = False):
     """
     加载配置文件
-    :param env_file: 环境变量文件路径，默认为项目根目录下的 config.env
+    :param env_file: 环境变量文件路径，默认为工作目录下的 config.env
+    :param override: 是否用文件里的值覆盖进程环境中已有的同名变量。
+                     python-dotenv 默认不覆盖，这在「同一进程里改完配置要立刻生效」
+                     （GUI 的设置页）场景下会读到旧值，所以那里必须传 True；
+                     命令行默认 False，保持「真实环境变量 > config.env」的既有优先级。
     """
     if env_file is None:
-        # 默认加载项目根目录下的 config.env
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        env_file = os.path.join(project_root, 'config.env')
-    
+        env_file = os.path.join(get_app_dir(), 'config.env')
+
     # 加载 .env 文件（如果存在）
     if os.path.exists(env_file):
-        load_dotenv(env_file)
+        load_dotenv(env_file, override=override)
+
+
+#: 本程序会写入 config.env 的键。GUI 保存设置后按这个清单把进程环境里的旧值清掉，
+#: 否则「把某一项清空」这个操作在 override=True 下依然会读到上一次的残留值。
+MANAGED_ENV_KEYS = (
+    'TINYPNG_API_KEYS', 'APIHZ_ID', 'APIHZ_KEY',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'PROXY_LIST',
+    'LOG_LEVEL', 'OUTPUT_COMPRESSION_LOG',
+    'TEMP_DIR', 'KEYS_FILE', 'ERROR_FILES',
+    'MAX_RETRY', 'UPLOAD_TIMEOUT', 'DOWNLOAD_TIMEOUT', 'THREAD_NUM',
+    'KEY_THRESHOLD', 'KEY_USAGE_LIMIT',
+)
+
+
+def _flatten_value(value) -> str:
+    """
+    把界面传来的值整理成能安全写进 .env 的单行字符串。
+
+    PROXY_LIST 在界面上是多行输入框，而 .env 的 `KEY=value` 语法下一行就是一项，
+    换行会直接把文件写坏（dotenv 解析不出后面几行）。配置项本身按逗号/分号也等价，
+    所以这里统一把换行折成逗号。
+    """
+    if value is None:
+        return ''
+    text = str(value).replace('\r\n', '\n').replace('\r', '\n').replace('\n', ',').strip()
+    return text
+
+
+def save_env_values(values: dict) -> str:
+    """
+    把若干配置项写回 config.env，**保留文件里的注释、空行和条目顺序**。
+
+    做法是逐行扫描，只替换 `KEY=` 左边的键能对上的那一行的右值；
+    文件里没有的键追加到末尾。这样用户在界面上改配置后，
+    config.env 依然是一份带说明、可以手改的文件，而不是被机器重写成光秃秃的键值对。
+
+    :param values: {键: 值} 字典
+    :return: 实际写入的文件路径
+    """
+    ensure_config_file()
+    path = os.path.join(get_app_dir(), 'config.env')
+    pending = {k: _flatten_value(v) for k, v in values.items() if k in MANAGED_ENV_KEYS}
+
+    lines = []
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            lines = f.read().splitlines()
+
+    out = []
+    pattern = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=')
+    for line in lines:
+        m = pattern.match(line)
+        if m and m.group(1) in pending:
+            key = m.group(1)
+            out.append(f'{key}={pending.pop(key)}')
+        else:
+            out.append(line)
+
+    # 文件里还没有的键（例如从旧版本升级上来）补到末尾
+    if pending:
+        if out and out[-1].strip():
+            out.append('')
+        out.append('# ===== 由设置界面补充的配置项 =====')
+        for key in sorted(pending):
+            out.append(f'{key}={pending[key]}')
+
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out) + '\n')
+    return path
+
+
+def reload_config(env_file: str = None):
+    """
+    重新从磁盘读取配置并在当前进程内生效（GUI 保存设置后调用）。
+    """
+    for key in MANAGED_ENV_KEYS:
+        os.environ.pop(key, None)
+    Config.load(env_file, override=True)
+
 
 
 def get_env_str(key: str, default: str = None) -> Optional[str]:
@@ -119,12 +242,19 @@ class Config:
     APIHZ_KEY: str = ''
     
     @classmethod
-    def load(cls, env_file: str = None):
+    def load(cls, env_file: str = None, override: bool = False):
         """
         加载所有配置
         :param env_file: 环境变量文件路径
+        :param override: 是否用 config.env 覆盖进程环境中已有的同名变量，见 load_config
         """
-        load_config(env_file)
+        # 打包产物 / 全新克隆首次运行时，把模板复制成 config.env，
+        # 用户直接编辑即可，不必自己「生成 .env」
+        created = ensure_config_file()
+        if created:
+            print(f'[提示] 已根据模板生成配置文件，请按需修改后重新运行: {created}')
+
+        load_config(env_file, override=override)
         
         # TinyPNG API Keys
         cls.TINYPNG_API_KEYS = get_env_list('TINYPNG_API_KEYS', [])
@@ -187,6 +317,13 @@ class Config:
         single = cls.get_proxy()
         return [single] if single else []
 
+
+#: 出厂默认值快照。必须在 Config.load() **之前**抓：load() 会用 config.env 里的值
+#: 覆盖这些类属性，覆盖之后界面上的「恢复默认值」就没有地方可取原值了。
+#: 这样取值不需要在任何地方手抄第二份默认值，源码里的类属性就是唯一来源。
+DEFAULTS = {key: (list(value) if isinstance(value, list) else value)
+            for key, value in vars(Config).items()
+            if not key.startswith('_') and not callable(value) and not isinstance(value, classmethod)}
 
 # 自动加载配置（在模块导入时执行）
 Config.load()
