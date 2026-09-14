@@ -8,13 +8,19 @@ import sys
 # 代价是解释器启动时 sys.stdin/stdout/stderr 全是 None。于是：
 #   - loguru / tqdm 一往 stdout 写就 AttributeError（import 阶段就可能炸）；
 #   - CLI 从裸终端跑时也拿不到输出。
-# 这里分两层兜底：第 0 层把所有 None 流接到 devnull（保证「不崩」），
-# 第 1 层在 CLI 分支把流真正接回终端/管道（保证「能看见」）。
+# 这里分三层兜底：
+#   第 0   层（_install_null_streams）：把所有 None 流接到 devnull（保证「不崩」）；
+#   第 0.5 层（_harden_stdio）：放宽流的错误处理器（保证「打印中文也不崩」，
+#            见该函数注释——Windows 的 ANSI 代码页会把 import 阶段直接干掉）；
+#   第 1   层（_ensure_cli_streams）：CLI 分支把流真正接回终端/管道（保证「能看见」）。
 # 只用标准库，不新增依赖。
 # ==========================================================
 
 #: 启动时标准流是否为 None。windowed 产物为 True，源码/有控制台运行为 False。
 _STREAMS_WERE_NULL: bool = False
+
+#: 三个标准流的名字。兜底逻辑对它们一视同仁，统一在这里列一份，避免三处各写一遍。
+_STD_NAMES: tuple = ('stdin', 'stdout', 'stderr')
 
 
 def _install_null_streams() -> None:
@@ -33,14 +39,45 @@ def _install_null_streams() -> None:
             _STREAMS_WERE_NULL = True
     except Exception:
         return
-    for name in ('stdin', 'stdout', 'stderr'):
+    for name in _STD_NAMES:
         try:
             if getattr(sys, name, None) is None:
                 setattr(sys, name, open(
                     os.devnull, 'r' if name == 'stdin' else 'w',
                     encoding='utf-8', errors='replace'))
         except Exception:
-            pass
+            # 单个流接不上不影响别的：最坏就是它仍是 None（print 到 None 是空操作）
+            continue
+
+
+def _harden_stdio() -> None:
+    """
+    第 0.5 层：把标准流的错误处理器放宽成 ``backslashreplace``。
+
+    为什么必须有这一层（这是 Windows 独有的坑）：
+      stdout 不是控制台时（CI 里被 runner 接成管道、或被 ``>`` 重定向），
+      sys.stdout 用的是系统 ANSI 代码页——英文 runner 上是 cp1252，中文机器上是 cp936。
+      此时打印中文会直接抛 UnicodeEncodeError。偏偏 ``tinypng_unlimited.config``
+      在**导入期**就会 print 一条中文提示（首次运行生成 config.env 时），
+      于是连 ``python bin/main.py --version`` 这种纯 ASCII 的命令都会崩在 import 阶段，
+      退出码 1。macOS / Linux 的 locale 是 UTF-8，同样的代码只在 Windows 上炸。
+
+    只放宽 ``errors``、**不动** ``encoding``：本来正常输出的字符一个字节都不会变，
+    只有「原本会抛异常」的少数字符才退化成 ``\\uXXXX`` 转义，
+    进程永远不会被一条提示语带崩。任何一步失败都静默跳过。
+    """
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if not callable(reconfigure):
+            # 不是 TextIOWrapper（比如被 IDE / 测试框架换成了别的流），别去动它
+            continue
+        try:
+            reconfigure(errors='backslashreplace')
+        except Exception:
+            continue
 
 
 def _ensure_cli_streams() -> bool:
@@ -64,57 +101,179 @@ def _ensure_cli_streams() -> bool:
         return sys.stdout is not None
     if not _STREAMS_WERE_NULL:
         return sys.stdout is not None
-    try:
-        import ctypes
-        import msvcrt
 
-        kernel32 = ctypes.windll.kernel32
-        std_ids = (('stdin', -10, os.O_RDONLY), ('stdout', -11, os.O_WRONLY),
-                   ('stderr', -12, os.O_WRONLY))
+    # 先把原始流存下来：后面任何一步失败都原样退回去，绝不让 sys.std* 停在半吊子状态
+    original = {name: getattr(sys, name, None) for name in _STD_NAMES}
+    reopened = {}
+    try:
+        reopened = _reopen_std_streams()
+    except Exception:
         reopened = {}
 
-        # --- 1. 先试继承来的句柄 ---
-        for name, std_id, flags in std_ids:
-            try:
-                handle = kernel32.GetStdHandle(std_id)
-            except Exception:
+    # 只保留「探测过确实能用」的流，坏的一个都不装
+    usable = {}
+    for name, stream in reopened.items():
+        try:
+            if _stream_usable(name, stream):
+                usable[name] = stream
+        except Exception:
+            continue
+    for name, stream in reopened.items():
+        if name not in usable:
+            _close_quietly(stream)
+
+    if not usable:
+        _restore_streams(original)
+        return sys.stdout is not None
+
+    try:
+        for name, stream in usable.items():
+            setattr(sys, name, stream)
+    except Exception:
+        # 装到一半炸了：全部退回原来的流，也不能留下坏流
+        _restore_streams(original)
+        for stream in usable.values():
+            _close_quietly(stream)
+    return sys.stdout is not None
+
+
+def _reopen_std_streams() -> dict:
+    """
+    真正去拿标准流，返回 {流名: 新流}；拿不到的一律不出现在结果里。
+
+    :raises Exception: 只在 ctypes / msvcrt 都不可用时抛，由调用方兜住。
+    """
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.windll.kernel32
+    # GetStdHandle 返回 HANDLE，64 位 Windows 上是 8 字节。不声明 restype 时 ctypes
+    # 默认按 32 位 int 取值，句柄高位会被截断，后面 open_osfhandle 拿到的就是错句柄。
+    kernel32.GetStdHandle.argtypes = (ctypes.c_uint32,)
+    kernel32.GetStdHandle.restype = ctypes.c_void_p
+    kernel32.AttachConsole.argtypes = (ctypes.c_uint32,)
+    kernel32.AttachConsole.restype = ctypes.c_int
+    kernel32.GetCurrentProcess.argtypes = ()
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.DuplicateHandle.argtypes = (
+        ctypes.c_void_p,                  # hSourceProcessHandle
+        ctypes.c_void_p,                  # hSourceHandle
+        ctypes.c_void_p,                  # hTargetProcessHandle
+        ctypes.POINTER(ctypes.c_void_p),  # lpTargetHandle
+        ctypes.c_uint32,                  # dwDesiredAccess
+        ctypes.c_int,                     # bInheritHandle
+        ctypes.c_uint32,                  # dwOptions
+    )
+    kernel32.DuplicateHandle.restype = ctypes.c_int
+
+    std_ids = (('stdin', -10, os.O_RDONLY), ('stdout', -11, os.O_WRONLY),
+               ('stderr', -12, os.O_WRONLY))
+    reopened = {}
+
+    # --- 1. 先试继承来的句柄 ---
+    for name, std_id, flags in std_ids:
+        try:
+            handle = kernel32.GetStdHandle(std_id)
+        except Exception:
+            continue
+        # 返回 None（c_void_p 的空值）/ 0 / 0xFFFFFFFF 都是「无效句柄」的惯用表示
+        if not handle or handle in (0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+            continue
+        try:
+            # open_osfhandle 会**转移**句柄所有权：新 fd 关闭时会把传进去的那个句柄
+            # 一起关掉。若直接拿 GetStdHandle 的结果，而这个句柄又正好被 CRT 的
+            # fd 1/2 引用着（进程本身已有合法标准流时就会这样），关新流会把原 stdout
+            # 的句柄也关掉 —— 之后任何 print 都炸，退出码还会变成 120（刷 stdout 失败）。
+            # 所以先 DuplicateHandle 复制一份，只把副本的所有权交出去。
+            dup = _dup_handle(kernel32, handle)
+            if not dup:
                 continue
-            # 0 / -1(0xFFFFFFFF) 都是「无效句柄」的惯用表示
-            if not handle or handle == 0xFFFFFFFF or handle == -1:
+            # 用 O_BINARY 避免 CRT 与 Python 文本层双重 CRLF 转换。
+            fd = msvcrt.open_osfhandle(dup, flags | os.O_BINARY)
+            reopened[name] = open(fd, 'r' if name == 'stdin' else 'w',
+                                  encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+    # --- 2. 拿不到 stdout 才接回父控制台 ---
+    if 'stdout' not in reopened:
+        try:
+            kernel32.AttachConsole(0xFFFFFFFF)  # ATTACH_PARENT_PROCESS == (DWORD)-1
+        except Exception:
+            pass
+        for name, con in (('stdin', 'CONIN$'), ('stdout', 'CONOUT$'),
+                          ('stderr', 'CONOUT$')):
+            if name in reopened:
                 continue
             try:
-                # open_osfhandle 会**转移**句柄所有权，因此之后不要再 CloseHandle；
-                # 用 O_BINARY 避免 CRT 与 Python 文本层双重 CRLF 转换。
-                fd = msvcrt.open_osfhandle(handle, flags | os.O_BINARY)
-                reopened[name] = open(fd, 'r' if name == 'stdin' else 'w',
+                reopened[name] = open(con, 'r' if name == 'stdin' else 'w',
                                       encoding='utf-8', errors='replace')
             except Exception:
                 continue
 
-        # --- 2. 拿不到 stdout 才接回父控制台 ---
-        if 'stdout' not in reopened:
-            try:
-                kernel32.AttachConsole(-1)  # ATTACH_PARENT_PROCESS
-            except Exception:
-                pass
-            for name, con in (('stdin', 'CONIN$'), ('stdout', 'CONOUT$'),
-                              ('stderr', 'CONOUT$')):
-                if name in reopened:
-                    continue
-                try:
-                    reopened[name] = open(con, 'r' if name == 'stdin' else 'w',
-                                          encoding='utf-8', errors='replace')
-                except Exception:
-                    continue
+    return reopened
 
-        for name, stream in reopened.items():
-            try:
-                setattr(sys, name, stream)
-            except Exception:
-                pass
+
+def _dup_handle(kernel32, handle: int) -> int:
+    """
+    复制一个内核句柄，返回副本的句柄值；失败返回 0。
+
+    见 _reopen_std_streams 里的说明：交给 msvcrt.open_osfhandle 的必须是副本，
+    否则新流被关闭时会把原标准流的句柄一起关掉。
+    """
+    import ctypes
+    try:
+        dup = ctypes.c_void_p()
+        ok = kernel32.DuplicateHandle(
+            kernel32.GetCurrentProcess(), handle,
+            kernel32.GetCurrentProcess(), ctypes.byref(dup),
+            0,          # dwDesiredAccess：配合 DUPLICATE_SAME_ACCESS 忽略
+            0,          # bInheritHandle
+            0x00000002,  # DUPLICATE_SAME_ACCESS
+        )
+        if not ok or not dup.value:
+            return 0
+        return int(dup.value)
+    except Exception:
+        return 0
+
+
+def _stream_usable(name: str, stream) -> bool:
+    """
+    探测一个新流是否真能用：先看 writable()/readable()，再对写流真的写一次空串并 flush。
+
+    只建流不验证的话，无效句柄会一路装到 sys.stdout 上，等到真正 print 时才炸，
+    那时候已经分不清是「流接错了」还是「业务代码写错了」。
+    """
+    try:
+        if name == 'stdin':
+            if not stream.readable():
+                return False
+            return True
+        if not stream.writable():
+            return False
+        stream.write('')       # 空串不产生任何可见输出，但会走一遍编码/缓冲
+        stream.flush()         # 句柄无效时 OSError 在这里就冒出来
+        return True
+    except Exception:
+        return False
+
+
+def _close_quietly(stream) -> None:
+    """关掉一个不再使用的流，失败就算了——不能因为收尾失败把进程带崩。"""
+    try:
+        stream.close()
     except Exception:
         pass
-    return sys.stdout is not None
+
+
+def _restore_streams(original: dict) -> None:
+    """把 sys.std* 退回给定的原始流（通常是 devnull），逐个失败互不影响。"""
+    for name, stream in original.items():
+        try:
+            setattr(sys, name, stream)
+        except Exception:
+            continue
 
 
 def _set_console_title(title: str) -> None:
@@ -128,7 +287,10 @@ def _set_console_title(title: str) -> None:
         return
     try:
         import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW(ctypes.c_wchar_p(title))
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleTitleW.argtypes = (ctypes.c_wchar_p,)
+        kernel32.SetConsoleTitleW.restype = ctypes.c_int
+        kernel32.SetConsoleTitleW(title)
     except Exception:
         pass
 
@@ -144,6 +306,9 @@ def _beep() -> None:
 
 # 第 0 层：必须在导入第三方包之前执行
 _install_null_streams()
+# 第 0.5 层：放宽标准流的错误处理器，同样要赶在任何第三方导入之前
+# （tinypng_unlimited.config 在导入期就会 print 中文提示）
+_harden_stdio()
 
 import argparse  # noqa: E402
 import json  # noqa: E402
@@ -188,7 +353,8 @@ def init(proxy=None):
             KeyManager.Keys.unavailable.append(key)
             KeyManager.store_key()
     else:
-        logger.error('所有密钥均无效，请运行 apply 申请新密钥')
+        logger.error('所有密钥均无效，请通过 add_key 手动添加密钥，'
+                     '或到图形界面「密钥」页用「手动注册（过验证码）」获取新密钥')
         exit()
 
     # 代理优先级：命令行 --proxy > config.env 的 PROXY_LIST / HTTPS_PROXY / HTTP_PROXY。
@@ -397,9 +563,21 @@ def command_tasks(args):
 
 
 def command_apply(args):
-    KeyManager.init_working_dir(get_app_dir())
-    KeyManager.load_keys()
-    KeyManager.apply_store_key(args.num)
+    """
+    保留 `apply` 子命令只是为了不破坏已有脚本，但它已经申请不到任何密钥。
+
+    2026-09 起 TinyPNG 注册加了验证码，自动申请链路整体失效：旧注册接口 404、
+    取 Token 接口 404、api.tinify.com 又不认网页 cookie（一律 401）。
+    所以这里不 raise、不发网络请求，只打印一段可读的中文引导，然后以退出码 1 结束。
+    """
+    print('[已停用] TinyPNG 注册已加验证码，自动申请密钥不可用。')
+    print('')
+    print('请改用下面两种方式之一获取密钥：')
+    print('  1. 图形界面：python bin/main.py gui')
+    print('     → 「密钥」页 →「手动注册（过验证码）」，跟着向导走完即可。')
+    print('  2. 命令行：python bin/main.py add_key <your_api_key>')
+    print('     把你已经在网页上复制到的密钥直接粘进来。')
+    sys.exit(1)
 
 
 def command_rearrange(args):
@@ -482,9 +660,12 @@ def main():
         p.add_argument('-l', '--log', action='store_true', help='Whether to output compression log in images dir.')
 
     # apply
-    apply_parser = subparsers.add_parser('apply', help='Apply TinyPNG API key.')
+    # 命令保留（不破坏已有脚本），但只打印引导并以退出码 1 结束，见 command_apply。
+    apply_parser = subparsers.add_parser(
+        'apply', help='已停用：TinyPNG 注册加验证码后无法自动申请密钥，'
+                      '请改用 gui 的「手动注册」或 add_key。')
     apply_parser.add_argument('num', type=int, nargs='?', default=4,
-                              help='The number of times to apply a TinyPNG API key.')
+                              help='已忽略，仅为兼容旧脚本保留。')
     apply_parser.set_defaults(func=command_apply)
 
     # rearrange

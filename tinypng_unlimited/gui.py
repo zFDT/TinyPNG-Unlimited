@@ -107,7 +107,7 @@ SETTING_FIELDS = [
     ('TINYPNG_API_KEYS', 'TinyPNG API Keys', '多个用逗号分隔；留空则用手动添加/注册的密钥', 'entry', '密钥与申请'),
     ('APIHZ_ID', '接口盒子 ID', 'apihz.cn 个人中心获取；「手动注册」时建临时邮箱要用', 'entry', '密钥与申请'),
     ('APIHZ_KEY', '接口盒子 KEY', '同上', 'entry', '密钥与申请'),
-    ('KEY_THRESHOLD', '密钥数量阈值', '可用密钥少于该值时给提示（自动申请已停用）', 'entry', '密钥与申请'),
+    ('KEY_THRESHOLD', '密钥数量阈值', '可用密钥少于该值时只提醒，不再触发自动申请', 'entry', '密钥与申请'),
     ('KEY_USAGE_LIMIT', '密钥使用上限', '单条密钥用到该次数后切换（TinyPNG 每月 500 次）', 'entry', '密钥与申请'),
 
     ('PROXY_LIST', '代理列表', '逗号/分号分隔，分散到多个出口 IP 可突破单 IP 限流', 'text', '网络与代理'),
@@ -1370,7 +1370,7 @@ class GuiApp:
         ttk.Button(card, text='刷新', command=lambda: self.refresh_keys()).pack(side='right')
 
         ttk.Label(tab,
-                  text='TinyPNG 注册页加了验证码后，自动申请已不可用。点「手动注册（过验证码）」在浏览器里过验证码，程序自动收信激活。',
+                  text='阈值只用于提醒，不再触发自动申请（TinyPNG 注册已加验证码）。点「手动注册（过验证码）」在浏览器里过验证码，程序自动收信激活。',
                   style='Dim.TLabel').grid(row=1, column=0, sticky='w', pady=(px(8), px(6)))
 
         outer, content, header = self._make_card(tab, '密钥列表')
@@ -2354,8 +2354,8 @@ class GuiApp:
     # ==========================================================
     # 手动注册（人工过验证码）
     #
-    # 2026-09 起 TinyPNG 注册加了验证码，自动申请走不通。但验证码之后的
-    # 「收激活邮件 → 点链接 → 生成 key」全是 HTTP，程序能自己做。
+    # 2026-09 起 TinyPNG 注册加了验证码，自动申请走不通，阈值也只用于提醒。
+    # 但验证码之后的「收激活邮件 → 点链接 → 生成 key」全是 HTTP，程序能自己做。
     # 所以只在「填表 + 过验证码」这一步把人请出来，前后都自动化。
     # ==========================================================
     def _manual_signup_start(self):

@@ -26,6 +26,41 @@ def get_app_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def safe_print(text: str) -> None:
+    """
+    往 stdout 打一行字，但**绝不让这一行把进程带崩**。
+
+    为什么不能直接用 print：Windows 上 stdout 不是控制台（被 runner 接成管道、
+    或被 ``>`` 重定向）时，sys.stdout 用的是系统 ANSI 代码页（英文机器 cp1252，
+    中文机器 cp936）。中文在这种流上是打不出来的，print 会抛 UnicodeEncodeError。
+    而本模块在**导入期**就会走一次 Config.load() 并打印首次生成 config.env 的提示，
+    于是 ``python bin/main.py --version`` 这种纯 ASCII 命令也会崩在 import 阶段。
+
+    降级策略：
+      1. 先按原样 print（正常路径一个字节都不变）；
+      2. 编码失败就把打不出的字符换成 ``\\uXXXX`` 再打一遍；
+      3. 还失败（或 sys.stdout 是 None，windowed 产物常见）就彻底放弃。
+
+    :param text: 要打印的一行文本
+    """
+    stream = sys.stdout
+    if stream is None:
+        return                      # windowed 产物：print 到 None 本来也是空操作
+    try:
+        print(text, file=stream)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    try:
+        encoding = getattr(stream, 'encoding', None) or 'utf-8'
+        fallback = text.encode(encoding, 'backslashreplace').decode(encoding, 'replace')
+        print(fallback, file=stream)
+    except Exception:
+        return
+
+
 def ensure_config_file() -> Optional[str]:
     """
     确保工作目录下存在 config.env，不存在则从模板复制一份。
@@ -237,7 +272,7 @@ class Config:
     KEY_THRESHOLD: int = 3
     KEY_USAGE_LIMIT: int = 490
 
-    # 接口盒子（apihz.cn）临时邮箱凭据（用于自动申请 TinyPNG 密钥）
+    # 接口盒子（apihz.cn）临时邮箱凭据（「手动注册」时建临时邮箱用；自动申请已停用）
     APIHZ_ID: str = ''
     APIHZ_KEY: str = ''
     
@@ -252,7 +287,7 @@ class Config:
         # 用户直接编辑即可，不必自己「生成 .env」
         created = ensure_config_file()
         if created:
-            print(f'[提示] 已根据模板生成配置文件，请按需修改后重新运行: {created}')
+            safe_print(f'[提示] 已根据模板生成配置文件，请按需修改后重新运行: {created}')
 
         load_config(env_file, override=override)
         

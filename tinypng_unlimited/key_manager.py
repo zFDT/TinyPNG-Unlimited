@@ -337,12 +337,24 @@ class KeyManager:
         """
         cls.load_keys()
 
-        if len(cls.Keys.available) < 3:
-            logger.warning('可用密钥少于3条，尝试申请新密钥')
-            cls.apply_store_key()
+        # 密钥不足时**只告警，不尝试申请**。
+        #
+        # next_key() 是**压缩线程**上调的（某条密钥配额用尽时切换下一条）。
+        # 以前这里会调 apply_store_key()，而自动申请链路 2026-09 起已全线 404，
+        # 结果就是压缩线程先白跑 4 轮网络请求、再每轮干等一通，卡住好几分钟后
+        # 照样失败。阈值也统一用 Config.KEY_THRESHOLD，跟 init() 保持一致。
+        if len(cls.Keys.available) < Config.KEY_THRESHOLD:
+            logger.warning(
+                '可用密钥仅剩 {} 条，少于阈值 {} 条。'
+                '自动申请不可用（TinyPNG 注册已加验证码），'
+                '请到「密钥」页用「手动注册（过验证码）」补密钥，'
+                '或直接粘贴已有密钥。',
+                len(cls.Keys.available), Config.KEY_THRESHOLD)
 
         if not len(cls.Keys.available):
-            raise Exception('无可用密钥，请申请后重试或通过 add_key 手动添加密钥')
+            raise Exception(
+                '无可用密钥。请通过 add_key 手动添加，'
+                '或到图形界面「密钥」页用「手动注册（过验证码）」获取新密钥')
         cls.Keys.unavailable.append(cls.Keys.available.pop(0))
         cls.store_key()
         logger.debug('密钥已切换，等待载入')
@@ -361,114 +373,6 @@ class KeyManager:
             logger.success('密钥已手动添加: {}', key[:8] + '...')
         else:
             logger.warning('密钥已存在，跳过添加')
-
-    @classmethod
-    def _apply_api_key(cls) -> str:
-        """
-        申请新密钥：
-        1. 通过接口盒子创建临时邮箱
-        2. 向 TinyPNG 注册该邮箱（触发确认邮件）
-        3. 轮询临时邮箱，提取激活链接
-        4. 访问激活链接，生成并获取新 API Key
-        """
-        if not Config.APIHZ_ID or not Config.APIHZ_KEY:
-            raise ApplyKeyException('未配置 APIHZ_ID / APIHZ_KEY，无法自动申请密钥', None)
-
-        with requests.Session() as session:
-            # 仅对 tinypng.com 的请求使用代理（绕过 IP 频率限制）
-            # apihz.cn 为国内服务，直连即可
-            proxy = Config.get_proxy()
-            if proxy:
-                session.proxies = {
-                    'http': proxy,
-                    'https': proxy,
-                }
-                logger.debug('申请密钥使用代理: {}', proxy)
-
-            # 创建临时邮箱（消耗 1 次 apihz 调用）
-            try:
-                mail = ApihzMail.create_new_mail(session)
-            except Exception as e:
-                raise ApplyKeyException('创建临时邮箱失败', e)
-
-            # 向 TinyPNG 注册，触发确认邮件
-            res = session.post('https://tinypng.com/web/api', json={
-                "fullName": mail[:mail.find('@')],
-                "mail": mail
-            })
-            if res.status_code == 429:
-                raise ApplyKeyException('新账号注册过于频繁', res.text)
-            if res.status_code == 404:
-                # 2026-09 实测：tinypng.com/web/api 已下线（注册迁到 tinify.com/signup，
-                # 且新端点 /backend/web/signup/submit 要求 captcha_challenge）。
-                # 自动申请这条路已经走不通了，别再让用户盯着「未知错误」猜。
-                raise ApplyKeyException(
-                    'TinyPNG 注册接口已下线（HTTP 404）。上游已改版并加入验证码，'
-                    '自动申请不可用 —— 请改用「手动注册」（由你填邮箱、过验证码）', None)
-            if res.status_code == 400:
-                raise ApplyKeyException(
-                    '注册被拒绝（HTTP 400）——新接口要求验证码，自动申请不可用，'
-                    '请改用「手动注册」', _brief(res.text))
-            if res.status_code != 200 or res.text != '{}':
-                raise ApplyKeyException(
-                    f'新账号注册未知错误 (HTTP {res.status_code})', _brief(res.text))
-            logger.info('注册邮件已发送至: {}', mail)
-
-            # 等待邮件到达后轮询（普通会员 6s 间隔，最多等待 ~60s）
-            logger.info('等待确认邮件到达（最多重试 {}s）...', ApihzMail._min_interval * 4)
-            time.sleep(ApihzMail._min_interval)  # 先等一个间隔再开始读
-
-            # 接收邮件，提取激活链接
-            try:
-                emails = ApihzMail.get_email_list(session, 1)
-                text = emails[0].get('text', '')
-
-                # 始终保存完整邮件便于调试（覆盖写入，保留最新一封）
-                debug_path = os.path.abspath(os.path.join(cls.working_dir, 'debug_email.html'))
-                with open(debug_path, 'w', encoding='utf-8') as _f:
-                    _f.write(text)
-                logger.debug('邮件完整内容已保存: {}', debug_path)
-
-                url = None
-                # TinyPNG 确认邮件中 href 格式：
-                # href="https://tinypng.com/login?token=...&amp;new=true&amp;redirect=..."
-                m = re.search(r'href=["\']?(https://(?:tinypng|tinify)\.com/login\?token=[^"\'>\s]+)', text)
-                if m:
-                    url = m.group(1).replace('&amp;', '&')
-                if not url:
-                    # 回退：纯文本格式
-                    m = re.search(r'(https://(?:tinypng|tinify)\.com/login\?token=\S+)', text)
-                    if m:
-                        url = m.group(1).rstrip('.,)>').replace('&amp;', '&')
-                if not url:
-                    raise ApplyKeyException(
-                        '激活链接提取失败，完整邮件已保存至 ' + debug_path, None
-                    )
-            except TempMailException as e:
-                raise ApplyKeyException('确认邮件接收失败', e)
-            logger.info('激活链接提取成功: {}...', url[:60])
-
-            # 访问激活链接，生成密钥
-            retry = 0
-            while True:
-                try:
-                    session.get(url)
-                    auth = session.get('https://tinify.com/web/session').json()['token']
-                    headers = {'authorization': f'Bearer {auth}'}
-                    session.post('https://api.tinify.com/api/keys', headers=headers)
-                    res = session.get('https://api.tinify.com/api', headers=headers)
-                    key = res.json()['keys'][-1]['key']
-                    break
-                except Exception as e:
-                    retry += 1
-                    if retry <= 3:
-                        logger.error('密钥生成失败，3s 后第 {} 次重试: {}', retry, e)
-                        time.sleep(3)
-                    else:
-                        raise ApplyKeyException(f'超出重试次数，密钥生成失败: {url}', e)
-
-            logger.success('新密钥生成成功')
-            return key
 
     # --------------------------------------------------------------
     # 手动注册（人工过验证码）
@@ -596,39 +500,3 @@ class KeyManager:
             return []
         res.raise_for_status()
         return (res.json() or {}).get('keys') or []
-
-    @classmethod
-    def apply_store_key(cls, times=None):
-        """
-        申请并保存密钥。
-
-        普通会员每分钟限 10 次 API 调用（6s 间隔），
-        批量申请时每两次之间等待一个额外间隔，避免触发频率限制。
-        """
-
-        # 允许申请次数（包括失败重试）
-        times = 4 - len(cls.Keys.available) if times is None else times
-
-        for i in range(times):
-            try:
-                logger.info('正在申请新密钥，进度: {}/{}', i + 1, times)
-                key = cls._apply_api_key()
-                cls.Keys.available.append(key)
-                cls.store_key()
-                logger.success('密钥申请成功，当前可用密钥数: {}', len(cls.Keys.available))
-
-                if i < times - 1:
-                    from tinypng_unlimited.apihz_mail import ApihzMail
-                    wait_time = ApihzMail._min_interval * 2  # 两个间隔，保守策略
-                    logger.info('等待 {:.0f}s 后继续申请下一个密钥...', wait_time)
-                    time.sleep(wait_time)
-
-            except Timeout as e:
-                logger.error("请求超时: {} - {}({})", e.request.method, e.request.url, bytes.decode(e.request.content))
-                if i < times - 1:
-                    time.sleep(15)
-            except Exception as e:
-                logger.error('自动申请密钥失败: {}', e)
-                logger.warning('提示：您可以手动添加 TinyPNG API 密钥')
-                logger.warning('使用方法：python main.py add_key <your_api_key>')
-                break
