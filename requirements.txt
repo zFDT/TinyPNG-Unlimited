@@ -8,4 +8,7 @@ requests>=2.31.0
 tinify>=1.6.0
 tqdm>=4.66.2
 urllib3>=2.2.1
-win32-setctime>=1.1.0
+# 图形界面的拖拽支持（可选：缺了不影响界面其余功能，只是不能把文件拖进窗口）
+# 它自带各平台的 tkdnd 动态库，属于 data files，打包时要在 spec 里显式收集
+tkinterdnd2>=0.4.2
+win32-setctime>=1.1.0; sys_platform == "win32"

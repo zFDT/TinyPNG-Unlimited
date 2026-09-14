@@ -144,3 +144,25 @@ memory
 snapshot
 assets
 bin
+
+# ===== 运行时产生的本地产物 =====
+# keys.json 里是**真实的 TinyPNG API Key**。
+# 这些文件的位置由 config.get_app_dir() 决定：源码运行时是项目根目录，打包后是 exe 同目录。
+# 早期只忽略了 bin/ 下的那一份；工作目录改成「项目根目录」以后，
+# 它们会直接裸露在仓库里，一次 git add -A 就可能把密钥推上公开仓库，
+# 所以这里按文件名做全局忽略（下面几条会同时覆盖 bin/ 下的旧位置）。
+keys.json
+keys.json.*.tmp
+error_files.json
+old_error_files.json
+log.json
+debug_email.html
+# 图形界面记下的窗口位置与上次勾选的选项（纯本机偏好，不该进仓库）
+gui_state.json
+
+# ===== 本地构建 / 临时产物 =====
+# 打包前要把旧的 build/ 改名腾位置（env 里的删除钩子是坏的，只能用 rename），
+# 这些 _old_build* 目录就会留在项目根，体积几十 MB，绝不能进仓库。
+_old_build*/
+# 运行期临时目录（QA 验证输出、调试残留等）
+tmp/
