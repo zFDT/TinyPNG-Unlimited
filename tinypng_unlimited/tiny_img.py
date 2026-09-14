@@ -18,6 +18,25 @@ from tqdm.utils import CallbackIOWrapper
 import tinypng_unlimited  # 不使用 from import 防止循环引用
 from tinypng_unlimited.errors import CompressException
 
+_NULL_OUT = None
+
+
+def _tqdm_out():
+    """
+    为 tqdm 挑一个真正可写的输出流。
+
+    打包成「无控制台」的窗口程序时 sys.stdout / sys.stderr 都可能是 None，
+    而 tqdm(file=None) 会回退到 stderr，随后在渲染进度条时抛
+    AttributeError: 'NoneType' object has no attribute 'write'——
+    表现为「一按开始就崩」。这里统一兜底到 os.devnull，并缓存句柄避免泄漏 fd。
+    """
+    global _NULL_OUT
+    if getattr(sys.stdout, 'write', None):
+        return sys.stdout
+    if _NULL_OUT is None:
+        _NULL_OUT = open(os.devnull, 'w')
+    return _NULL_OUT
+
 
 class TinyImg:
     _lock: RLock = RLock()
@@ -226,6 +245,12 @@ class TinyImg:
         :param timeout: 下载超时
         """
         file_name = os.path.basename(path)
+        # tmp_dir 正常是在 set_key() 里按 KeyManager.working_dir 算出来的。
+        # 万一有调用方没走 set_key（例如直接调用引擎做单文件压缩），
+        # 这里兜底再算一次，免得抛出一个和「临时目录」八竿子打不着的 AttributeError。
+        if not getattr(cls, 'tmp_dir', None):
+            cls.tmp_dir = os.path.abspath(
+                os.path.join(tinypng_unlimited.KeyManager.working_dir, 'tmp'))
         if not os.path.exists(cls.tmp_dir):
             os.makedirs(cls.tmp_dir, exist_ok=True)
         # 临时文件名必须全局唯一。同一目录树下存在同名文件（例如 images/common/icon_tip.png
@@ -240,7 +265,7 @@ class TinyImg:
                 res = cls._session.get(url, stream=True, timeout=timeout,
                                        proxies=cls.proxy_pair(proxy))
                 file_size = int(res.headers.get('content-length', 0))
-                with tqdm(file=sys.stdout, desc=f'[下载进度]: {file_name}', colour='red', ncols=120, leave=False,
+                with tqdm(file=_tqdm_out(), desc=f'[下载进度]: {file_name}', colour='red', ncols=120, leave=False,
                           ascii=' ▇', total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
                     with open(tmp_path, 'wb') as f:
                         wrapped_file = CallbackIOWrapper(bar.update, f, 'write')
@@ -362,7 +387,7 @@ class TinyImg:
                 with cls._lock:
                     cls.check_compression_count()
                     old_key = tinify.key
-                with tqdm(file=sys.stdout, desc=f'[上传进度]: {file_name}', colour='green', ncols=120, leave=False,
+                with tqdm(file=_tqdm_out(), desc=f'[上传进度]: {file_name}', colour='green', ncols=120, leave=False,
                           ascii=' ▇', total=old_size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
                     logger.info('正在上传图片至云端压缩[{}]: {}', cls._byte_converter(old_size), file_name)
                     with open(path, "rb") as f:
@@ -399,16 +424,21 @@ class TinyImg:
                     raise CompressException('超出压缩重试次数', {'path': path, 'err': e})
 
     @classmethod
-    def compress_from_file_list(cls, file_list, new_dir=None, upload_timeout=None, download_timeout=None) -> dict:
+    def compress_from_file_list(cls, file_list, new_dir=None, upload_timeout=None, download_timeout=None,
+                                on_progress=None, should_stop=None) -> dict:
         """
         批量压缩多个文件
         :param file_list: 文件路径列表
         :param new_dir: 输出文件夹
         :param upload_timeout: 上传响应超时时间，默认60s
         :param download_timeout: 下载响应超时时间，默认30s
+        :param on_progress: 每完成一份回调一次，签名
+                            on_progress(done, total, file_name, ok, success_total, error_total)，
+                            后两个参数是「本批次累计成功/失败数」，GUI 用它实时刷新统计
+        :param should_stop: 返回 True 时停止本次批量压缩。只会取消「尚未开始」的任务，
+                            正在压缩中的线程会正常跑完（因此不会留下半个文件、不会损坏原图）。
         :return: 压缩情况报告
         """
-
         if new_dir and not os.path.exists(new_dir):
             os.makedirs(new_dir)
 
@@ -416,6 +446,7 @@ class TinyImg:
         old_size = new_size = 0  # python不用担心大数运算溢出问题
         error_files, success_files = [], []
         file_num = len(file_list)
+        stopped = False
 
         logger.info('待压缩图片数量: {}', file_num)
 
@@ -424,8 +455,9 @@ class TinyImg:
         # 按实际并发数放大 HTTP 连接池（默认池只有 10，超过就会被 urllib3 丢弃连接，
         # 每个请求退回完整 TLS 握手，表现为「线程越多越慢」）。不传参即按 THREAD_NUM 推算。
         cls.ensure_session_pool()
-        with ThreadPoolExecutor(thread_num) as pool:
-            with tqdm(desc='[任务进度]', unit='份', total=file_num, file=sys.stdout, ascii=' ▇',
+        pool = ThreadPoolExecutor(thread_num)
+        try:
+            with tqdm(desc='[任务进度]', unit='份', total=file_num, file=_tqdm_out(), ascii=' ▇',
                       colour='yellow', leave=False, ncols=120, position=thread_num) as bar:
                 future_list = []
                 for old_path in file_list:
@@ -435,30 +467,80 @@ class TinyImg:
                     future_list.append(pool.submit(cls.compress_from_file, old_path, new_path, True,
                                                    upload_timeout, download_timeout))
 
-                for future in as_completed(future_list):
+                def take(future):
+                    """
+                    取一个任务的结果并记账。
+
+                    返回 True 表示确实处理了一份（成功或失败都算），
+                    返回 False 表示这个任务被取消了、不算数。
+                    """
+                    nonlocal success_count, old_size, new_size
+                    if future.cancelled():
+                        return False
+                    file_name, ok = '', False
                     try:
                         info = future.result()
                         # 压缩成功则统计信息
                         old_size += info[1]
                         new_size += info[2]
                         success_count += 1
+                        file_name, ok = info[0], True
                         success_files.append(
                             (info[0], cls._byte_converter(info[1]), cls._byte_converter(info[2]), info[3])
                         )
                         logger.success('图片压缩完成: {}', info[0])
                     except CompressException as e:
                         error_files.append(e.detail['path'])
-                        logger.error('压缩图片失败: {} {}', os.path.basename(e.detail['path']), e)
+                        file_name = os.path.basename(e.detail['path'])
+                        logger.error('压缩图片失败: {} {}', file_name, e)
                     except Exception as e:
                         logger.error('压缩图片未知错误 {}', e)
                     bar.update()
+                    if on_progress is not None:
+                        try:
+                            on_progress(success_count + len(error_files), file_num, file_name,
+                                        ok, success_count, len(error_files))
+                        except Exception:
+                            # 回调属于展示层，绝不能因为界面出错而中断压缩
+                            pass
+                    return True
+
+                stop_requested = False
+                for future in as_completed(future_list):
+                    if not stop_requested and should_stop is not None and should_stop():
+                        stop_requested = True
+                        stopped = True
+                        # wait=False 不去等已提交的任务；cancel_futures=True 只取消「还没被
+                        # 线程取走」的任务。正在跑的压缩不受影响，会自己正常跑完，
+                        # 所以停止是安全的、不会产生半截文件。
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        logger.warning('收到停止请求，已取消 {} 个尚未开始的任务',
+                                       sum(1 for f in future_list if f.cancelled()))
+                        # 必须跳出 as_completed，不能指望它继续把剩下的吐出来：
+                        # 实测（Python 3.13）as_completed 只会产出真正完成的 future，
+                        # **被取消的永远不会产出**，继续迭代就会一直阻塞下去，
+                        # 表现出来就是「点了停止，界面卡在正在停止直到超时」。
+                        break
+                    take(future)
+
+                if stop_requested:
+                    # 直接遍历原始列表来收割。被取消的跳过；仍在运行的处理掉——它们会
+                    # 自己跑完（只取消未开始的任务保证了这一点），所以这里等得到结果，
+                    # 也就能把「其实已经压缩完、文件已经改了」的部分如实计入统计，
+                    # 而不是让用户看到「成功 0」。
+                    for future in future_list:
+                        take(future)
                 bar_info = bar.format_dict
+        finally:
+            # stopped 时上面已经 shutdown 过、且刻意不等（等在跑的线程会把「停止」按钮卡住）；
+            # 未停止时任务都已被 await 完，wait=True 只是走一遍正常收尾。
+            pool.shutdown(wait=not stopped)
 
         compression = f'{round(100 * new_size / old_size, 2)}%' if old_size else '100%'
         return {
             'basic': {
                 'file_num': file_num, 'success_count': success_count,
-                'error_count': len(error_files),
+                'error_count': len(error_files), 'stopped': stopped,
                 'time': '{:.2f} s'.format(bar_info['elapsed']), 'speed': '{:.2f} 份/s'.format(bar_info['rate']),
                 'output_size': cls._byte_converter(new_size), 'input_size': cls._byte_converter(old_size),
                 'compression': compression, 'output_dir': '覆盖原文件' if new_dir is None else new_dir,
@@ -468,12 +550,15 @@ class TinyImg:
         }
 
     @classmethod
-    def compress_from_dir(cls, dir_path, new_dir=None, reg=r'.*\.(jpe?g|png|svga)$') -> dict:
+    def compress_from_dir(cls, dir_path, new_dir=None, reg=r'.*\.(jpe?g|png|svga)$',
+                          on_progress=None, should_stop=None) -> dict:
         """
         压缩文件夹内图片
         :param dir_path: 文件夹路径
         :param new_dir: 输出路径(None则覆盖原文件)
         :param reg: 文件名正则匹配
+        :param on_progress: 进度回调，透传给 compress_from_file_list
+        :param should_stop: 停止条件回调，透传给 compress_from_file_list
         :return: 压缩情况报告
         """
         if not os.path.exists(dir_path):
@@ -489,7 +574,8 @@ class TinyImg:
         if not len(file_list):
             raise CompressException('文件夹内无任何匹配文件', dir_path)
 
-        res = cls.compress_from_file_list(file_list, new_dir)
+        res = cls.compress_from_file_list(file_list, new_dir,
+                                          on_progress=on_progress, should_stop=should_stop)
         res['input_dir'] = dir_path
         return res
 
