@@ -1,4 +1,6 @@
-__all__ = ['TinyImg', 'KeyManager']
+__all__ = ['TinyImg', 'KeyManager', '__version__']
+
+from tinypng_unlimited.version import __version__
 
 from loguru import logger
 from tqdm import tqdm

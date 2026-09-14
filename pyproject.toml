@@ -1,5 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "workspace"
-version = "0.1.0"
+name = "tinypng-unlimited"
+description = "Unlimited batch image compression via the TinyPNG API, with automatic API key rotation"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+license = { file = "LICENSE" }
+# 版本号唯一来源是 tinypng_unlimited/version.py，不要在这里再写一遍
+dynamic = ["version"]
+dependencies = [
+    "certifi>=2024.2.2",
+    "charset-normalizer>=3.3.2",
+    "colorama>=0.4.6",
+    "idna>=3.7",
+    "loguru>=0.7.2",
+    "python-dotenv>=1.0.1",
+    "requests>=2.31.0",
+    "tinify>=1.6.0",
+    "tqdm>=4.66.2",
+    "urllib3>=2.2.1",
+    # 拖拽支持（可选依赖，缺失时界面自动降级为「只用按钮添加」）
+    "tkinterdnd2>=0.4.2",
+    "win32-setctime>=1.1.0; sys_platform == 'win32'",
+]
+
+# 说明：本项目主要分发方式是各平台预编译产物 + 源码运行，不提供 console_scripts 入口。
+# 原因：bin/main.py 依赖 sys.argv[0] 推断工作目录，装进 site-packages 后
+# keys.json / tmp 会落到 site-packages 里，语义是错的。
+
+[tool.setuptools]
+packages = ["tinypng_unlimited"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tinypng_unlimited.version.__version__" }
