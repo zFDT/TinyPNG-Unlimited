@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # 允许手动触发做一次不带 Release 的构建验证
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            asset: TinyPNG-Unlimited-windows-x64.exe
+          - os: macos-15          # arm64 (Apple Silicon)
+            label: macos-arm64
+            asset: TinyPNG-Unlimited-macos-arm64
+          - os: macos-15-intel    # macOS 13 已退役，Intel 机型现在是 15-intel
+            label: macos-x64
+            asset: TinyPNG-Unlimited-macos-x64
+          - os: ubuntu-22.04      # 用较老的 glibc 构建，兼容的发行版更多
+            label: linux-x64
+            asset: TinyPNG-Unlimited-linux-x64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "pyinstaller>=6.6"
+
+      - name: 确保 tkinter 可用（GUI 依赖标准库 Tk）
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python -c "import tkinter" 2>/dev/null; then
+            python -c "import tkinter; print('tkinter OK, Tk', tkinter.TkVersion)"
+            exit 0
+          fi
+          echo "当前解释器缺少 tkinter，尝试补装"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-tk
+          fi
+          # 补装后仍不可用就直接失败：宁可构建报错，也不要安静地产出「没有界面」的二进制
+          python -c "import tkinter; print('tkinter OK (补装后), Tk', tkinter.TkVersion)"
+
+      - name: 确保拖拽依赖可用
+        run: |
+          python -c "import tkinterdnd2, os; print('tkinterdnd2 OK:', os.path.dirname(tkinterdnd2.__file__))"
+
+      - name: 源码冒烟（先确认逻辑本身没问题）
+        run: python bin/main.py --version
+
+      - name: 打包
+        run: pyinstaller --clean --noconfirm TinyPNG-Unlimited.spec
+
+      - name: 打包产物冒烟
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f dist/TinyPNG-Unlimited.exe ]; then BIN=dist/TinyPNG-Unlimited.exe; else BIN=dist/TinyPNG-Unlimited; fi
+          ls -l "$BIN"
+          chmod +x "$BIN" 2>/dev/null || true
+          OUT=$("$BIN" --version)
+          echo "产物输出: $OUT"
+          case "$OUT" in
+            *TinyPNG-Unlimited*) ;;
+            *) echo "::error::打包产物 --version 输出异常: $OUT"; exit 1 ;;
+          esac
+
+      - name: 产物 GUI 自检（不弹窗，只验证 tkinter 与 gui 模块真的打进产物了）
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f dist/TinyPNG-Unlimited.exe ]; then BIN=dist/TinyPNG-Unlimited.exe; else BIN=dist/TinyPNG-Unlimited; fi
+          "$BIN" selftest
+
+      - name: 重命名产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f dist/TinyPNG-Unlimited.exe ]; then SRC=dist/TinyPNG-Unlimited.exe; else SRC=dist/TinyPNG-Unlimited; fi
+          mkdir -p out
+          cp "$SRC" "out/${{ matrix.asset }}"
+          ls -l out
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: 创建 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 列出待发布文件
+        run: find artifacts -type f | sort
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          body: |
+            ### 下载
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | Windows x64 | `TinyPNG-Unlimited-windows-x64.exe` |
+            | macOS Apple Silicon (M 系列) | `TinyPNG-Unlimited-macos-arm64` |
+            | macOS Intel | `TinyPNG-Unlimited-macos-x64` |
+            | Linux x64 | `TinyPNG-Unlimited-linux-x64` |
+
+            ### 首次运行
+
+            **双击 = 图形界面，带参数 = 命令行**，同一个文件两种用法。
+
+            首次执行会在可执行文件旁边自动生成 `config.env`（由模板复制而来）；
+            也可以直接在图形界面的「设置」页里填 `APIHZ_ID` / `APIHZ_KEY` 并保存，
+            不需要自己创建或编辑 `.env` 文件。
+            `keys.json`、`tmp/`、`gui_state.json` 同样落在可执行文件所在目录。
+
+            ### 图形界面
+
+            - **添加任务**：把图片或文件夹直接拖进窗口；也可以用「添加图片 / 添加文件夹」按钮
+              （快捷键 `Ctrl+O` / `Ctrl+Shift+O`）。
+            - **键盘**：`F5` 开始、`Esc` 停止、`Delete` 移除选中项、`F1` 查看全部快捷键。
+            - **右键**列表可以打开所在位置、移除或清空。
+            - 窗口大小与上次勾选的选项会被记住。
+            - 「设置」页改完点「保存配置」即刻生效，无需手改 `.env`。
+
+            ### 注意：产物未做代码签名
+
+            - **macOS**：未签名未公证，首次运行需先去掉隔离属性：
+
+              ```bash
+              chmod +x TinyPNG-Unlimited-macos-arm64
+              xattr -dr com.apple.quarantine TinyPNG-Unlimited-macos-arm64
+              ./TinyPNG-Unlimited-macos-arm64          # 不加参数即打开图形界面
+              ```
+
+              这是单个可执行文件（非 `.app`），在终端里运行最稳妥。
+              图形界面需要系统提供 Tk；若提示缺少 `tkinter`，用命令行模式即可，
+              或 `brew install python-tk` 后改用源码运行。
+
+            - **Windows**：未签名，SmartScreen 可能提示「已保护你的电脑」，
+              点「更多信息 → 仍要运行」即可。双击直接进图形界面
+              （按 windowed 子系统打包，不会弹出控制台窗口）；
+              从已有终端带参数启动时会挂回父控制台，输出与管道均正常。
+
+            - **Linux**：`chmod +x` 后直接运行。图形界面需要 `python3-tk`
+              （`sudo apt install python3-tk`）；没有它时用命令行模式。
