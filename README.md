@@ -361,3 +361,34 @@ TinyPNG-Unlimited/
 > **第 6-7 步的人工复制无法省略。** 控制台 `https://tinify.com/dashboard/api` 是**纯客户端渲染**的，
 > key 不在 HTML 里；而 `api.tinify.com` 又不认网页登录 cookie（一律 401）。
 > 这两条路都堵死了，程序拿不到 key，**只能人在页面上复制**。
+
+## 我的贡献与复盘
+
+### 关于本仓库（fork 说明）
+
+本仓库是 [AkiChase/TinyPNG-Unlimited](https://github.com/AkiChase/TinyPNG-Unlimited) 的 **fork**。
+上游定位为「自动申请 API 秘钥 + 多线程 + 带进度条」的 TinyPNG 批量云压缩工具，
+我在其基础上做了大量修复与增强（GUI 重做、崩溃修复、多平台打包等），
+并以独立维护版 [tinypng-unlimited-pro](https://github.com/zFDT/tinypng-unlimited-pro) 的形式接手长期维护。
+
+### 个人贡献
+
+- **GUI 重做**：用 Tkinter 重写图形界面，改为「压缩 / 设置 / 密钥」三页签结构，
+  支持图片/文件夹**拖拽进窗口**、实时进度条、统计与运行日志、可随时停止；
+  配置项在界面内即可读写 `config.env`，不再要求用户手动创建或编辑 `.env` 文件。
+- **崩溃修复**：修复了自动申请密钥链路失效后程序反复报错/中断的问题；
+  针对 TinyPNG 2026-09 注册接口改版（旧自动注册与取 Token 接口返回 404、控制台纯客户端渲染），
+  将「自动申请密钥」改为「手动注册向导（人工过一次验证码）」，
+  密钥不足时只提醒、不再尝试自动申请，避免后台无谓请求与异常退出。
+- **四平台构建**：补齐 Windows x64、macOS Apple Silicon、macOS Intel、Linux x64 四平台预编译产物，
+  通过 GitHub Actions 在打 `v*` tag 时自动构建并发布 Release；
+  Windows 产物按 windowed 子系统打包，双击不弹控制台窗口，带参数启动又能正确回挂父控制台。
+
+### 收获与规划
+
+从「fork 上游做点小改动」到「派生独立仓库长期维护」，这段经历让我系统走了一遍
+开源项目的接手与演进路径：先读懂上游架构与既有约定，再围绕真实痛点（密钥链路失效、
+跨平台分发、无图形界面）做增量改造，最后沉淀为可自动构建、可持续发布的独立项目。
+
+后续规划上，`tinypng-unlimited-pro` 会作为主线继续维护：跟进 TinyPNG 接口变化、
+完善四平台构建流水线、优化并发与限流策略，并在功能稳定后回馈上游社区。
